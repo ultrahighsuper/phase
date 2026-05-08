@@ -143,6 +143,12 @@ fn detect_replacement_instead(
     if any_ability_has_exile_parent_rider(parsed) {
         return;
     }
+    // CR 608.2c + CR 614.1a: effect-chain "instead" overrides are encoded as
+    // `AbilityCondition::*Instead` on a sub_ability, not as top-level
+    // replacement definitions.
+    if any_ability_has_instead_condition(parsed) {
+        return;
+    }
     // Some cards model "instead" inside a static or ability rather than as
     // a top-level replacement (e.g., conditional alternatives). Conservative
     // exemption: if any static/ability/trigger description mentions "instead",
@@ -515,6 +521,57 @@ fn any_ability_has_exile_parent_rider(parsed: &ParsedAbilities) -> bool {
             t.execute
                 .as_deref()
                 .is_some_and(def_tree_has_exile_parent_rider)
+        })
+}
+
+fn condition_has_instead_semantics(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::ConditionInstead { .. } => true,
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_has_instead_semantics)
+        }
+        AbilityCondition::Not { condition } => condition_has_instead_semantics(condition),
+        _ => false,
+    }
+}
+
+fn def_tree_has_instead_condition(def: &AbilityDefinition) -> bool {
+    if def
+        .condition
+        .as_ref()
+        .is_some_and(condition_has_instead_semantics)
+    {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_instead_condition(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_instead_condition(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_instead_condition)
+}
+
+fn any_ability_has_instead_condition(parsed: &ParsedAbilities) -> bool {
+    parsed.abilities.iter().any(def_tree_has_instead_condition)
+        || parsed.triggers.iter().any(|t| {
+            t.execute
+                .as_deref()
+                .is_some_and(def_tree_has_instead_condition)
+        })
+        || parsed.replacements.iter().any(|r| {
+            r.execute
+                .as_deref()
+                .is_some_and(def_tree_has_instead_condition)
         })
 }
 
@@ -1814,6 +1871,19 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    #[test]
+    fn replacement_instead_accepts_effect_chain_instead_condition() {
+        let parsed = parse_named(
+            "Kicker—Sacrifice a land.\n\
+             Prevent the next 3 damage that would be dealt this turn to any number of targets, divided as you choose. \
+             If this spell was kicked, prevent the next 6 damage this way instead.",
+            "Pollen Remedy",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Replacement_Instead"));
     }
 
     #[test]
