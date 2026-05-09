@@ -1,8 +1,8 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
-    CastingPermission, ChoiceType, ContinuousModification, Duration, Effect, GameRestriction,
-    ModalSelectionCondition, QuantityExpr, ResolvedAbility, RestrictionPlayerScope,
-    StaticDefinition, TargetFilter, TargetRef,
+    CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, Duration, Effect,
+    GameRestriction, ModalSelectionCondition, QuantityExpr, ResolvedAbility,
+    RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
@@ -130,6 +130,7 @@ struct PreparedSpellCast {
     mana_cost: crate::types::mana::ManaCost,
     modal: Option<crate::types::ability::ModalChoice>,
     casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
     /// CR 601.2a: Zone the card was in before announcement (hand / command /
     /// graveyard / exile). Threaded onto `PendingCast.origin_zone` so that
     /// CancelCast (CR 601.2i) can return the object to its origin zone.
@@ -1497,8 +1498,10 @@ fn prepare_spell_cast_with_variant_override(
     };
     let has_granted_flash =
         effective_spell_keyword_kinds(state, player, object_id).contains(&KeywordKind::Flash);
+    let cast_outside_sorcery_timing = !restrictions::is_sorcery_speed_window(state, player);
     // CR 304.1: Instants can be cast any time a player has priority.
     // CR 301.1 / CR 306.1: Artifacts and planeswalkers are cast at sorcery speed.
+    let mut cast_timing_permission = None;
     if let Err(base_timing_error) = restrictions::check_spell_timing(
         state,
         player,
@@ -1520,6 +1523,11 @@ fn prepare_spell_cast_with_variant_override(
             casting_variant,
         )?;
         mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
+        if cast_outside_sorcery_timing {
+            cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
+        }
+    } else if cast_outside_sorcery_timing && has_granted_flash {
+        cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
     }
     restrictions::check_casting_restrictions(state, player, object_id, &obj.casting_restrictions)?;
 
@@ -1589,6 +1597,7 @@ fn prepare_spell_cast_with_variant_override(
         mana_cost,
         modal: obj.modal.clone(),
         casting_variant,
+        cast_timing_permission,
         origin_zone,
     })
 }
@@ -3242,6 +3251,7 @@ fn continue_with_prepared(
                     placeholder,
                     prepared.mana_cost.clone(),
                     prepared.casting_variant,
+                    prepared.cast_timing_permission,
                     modal_choice.clone(),
                     ability_def.distribute.clone(),
                     prepared.origin_zone,
@@ -3267,6 +3277,7 @@ fn continue_with_prepared(
                 prepared.mana_cost.clone(),
             );
             pending_modal.casting_variant = prepared.casting_variant;
+            pending_modal.cast_timing_permission = prepared.cast_timing_permission;
             pending_modal.distribute = ability_def.distribute.clone();
             pending_modal.target_constraints = target_constraints;
             pending_modal.origin_zone = prepared.origin_zone;
@@ -3342,6 +3353,7 @@ fn continue_with_prepared(
                     resolved,
                     &prepared.mana_cost,
                     prepared.casting_variant,
+                    prepared.cast_timing_permission,
                     prepared.origin_zone,
                     events,
                 );
@@ -3354,6 +3366,7 @@ fn continue_with_prepared(
                     prepared.mana_cost.clone(),
                 );
                 pending_aura.casting_variant = prepared.casting_variant;
+                pending_aura.cast_timing_permission = prepared.cast_timing_permission;
                 pending_aura.distribute = prepared
                     .ability_def
                     .as_ref()
@@ -3385,6 +3398,7 @@ fn continue_with_prepared(
                 resolved,
                 prepared.mana_cost,
                 prepared.casting_variant,
+                prepared.cast_timing_permission,
                 prepared
                     .ability_def
                     .as_ref()
@@ -3407,6 +3421,7 @@ fn continue_with_prepared(
                 resolved,
                 &prepared.mana_cost,
                 prepared.casting_variant,
+                prepared.cast_timing_permission,
                 prepared.origin_zone,
                 events,
             );
@@ -3420,6 +3435,7 @@ fn continue_with_prepared(
             prepared.mana_cost.clone(),
         );
         pending_targets.casting_variant = prepared.casting_variant;
+        pending_targets.cast_timing_permission = prepared.cast_timing_permission;
         pending_targets.distribute = prepared
             .ability_def
             .as_ref()
@@ -3442,6 +3458,7 @@ fn continue_with_prepared(
         resolved,
         &prepared.mana_cost,
         prepared.casting_variant,
+        prepared.cast_timing_permission,
         prepared.origin_zone,
         events,
     )
@@ -3504,6 +3521,7 @@ fn continue_with_no_ability(
         placeholder,
         &prepared.mana_cost,
         prepared.casting_variant,
+        prepared.cast_timing_permission,
         prepared.origin_zone,
         events,
     )
@@ -8057,6 +8075,10 @@ mod tests {
 
         assert!(matches!(result, WaitingFor::Priority { .. }));
         assert_eq!(state.stack.len(), 1);
+        assert_eq!(
+            state.objects.get(&obj_id).unwrap().cast_timing_permission,
+            Some((CastTimingPermission::AsThoughHadFlash, state.turn_number))
+        );
     }
 
     #[test]
@@ -8081,6 +8103,10 @@ mod tests {
         handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(20), &mut Vec::new())
             .expect("normal-timing cast should not require flash surcharge");
         assert_eq!(state.stack.len(), 1);
+        assert_eq!(
+            state.objects.get(&obj_id).unwrap().cast_timing_permission,
+            None
+        );
     }
 
     #[test]
@@ -8216,6 +8242,10 @@ mod tests {
 
         assert!(matches!(result, WaitingFor::Priority { .. }));
         assert_eq!(state.stack.len(), 1);
+        assert_eq!(
+            state.objects.get(&obj_id).unwrap().cast_timing_permission,
+            Some((CastTimingPermission::AsThoughHadFlash, state.turn_number))
+        );
     }
 
     #[test]
@@ -9444,6 +9474,7 @@ mod tests {
                 generic: 0,
             },
             CastingVariant::Normal,
+            None,
             None,
             Zone::Hand,
             &mut events,

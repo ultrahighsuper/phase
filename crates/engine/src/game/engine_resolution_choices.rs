@@ -1266,6 +1266,7 @@ pub(super) fn handle_resolution_choice(
                         pending.ability,
                         &pending.cost,
                         pending.casting_variant,
+                        pending.cast_timing_permission,
                         pending.origin_zone,
                         events,
                     )?;

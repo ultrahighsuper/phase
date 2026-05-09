@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationRestriction, AdditionalCost, CastingRestriction, Comparator, ContinuousModification,
-    DelayedTriggerCondition, Effect, ManaProduction, ModalChoice, ParsedCondition, QuantityExpr,
-    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
+    ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, Comparator,
+    ContinuousModification, DelayedTriggerCondition, Effect, ManaProduction, ModalChoice,
+    ParsedCondition, QuantityExpr, ReplacementDefinition, SolveCondition, SpellCastingOption,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypedFilter,
 };
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
@@ -852,6 +853,53 @@ fn ability_word_to_trigger_condition(
         StaticCondition::HasMaxSpeed => Some(TriggerCondition::HasMaxSpeed),
         _ => None,
     }
+}
+
+fn parse_flash_cleanup_sacrifice_casting_option(
+    line: &str,
+) -> Option<(SpellCastingOption, TriggerDefinition)> {
+    let lower = line.trim().to_ascii_lowercase();
+    let (rest, _) =
+        tag::<_, _, OracleError<'_>>("you may cast this spell as though it had flash. ")
+            .parse(lower.as_str())
+            .ok()?;
+    let (rest, _) =
+        tag::<_, _, OracleError<'_>>("if you cast it any time a sorcery couldn't have been cast, ")
+            .parse(rest)
+            .ok()?;
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.",
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let sacrifice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+        },
+    );
+    let delayed = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Cleanup,
+            },
+            effect: Box::new(sacrifice),
+            uses_tracked_set: false,
+        },
+    );
+    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .destination(Zone::Battlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(TriggerCondition::CastTimingPermission {
+            permission: CastTimingPermission::AsThoughHadFlash,
+        })
+        .execute(delayed)
+        .description(line.to_string());
+
+    Some((SpellCastingOption::as_though_had_flash(), trigger))
 }
 
 /// Lower an `OracleDocIr` into the final `ParsedAbilities` via exhaustive match
@@ -1706,6 +1754,13 @@ pub(crate) fn parse_oracle_ir(
                 i += 1;
                 continue;
             }
+        }
+
+        if let Some((option, trigger)) = parse_flash_cleanup_sacrifice_casting_option(&line) {
+            result.casting_options.push(option);
+            result.triggers.push(trigger);
+            i += 1;
+            continue;
         }
 
         // Priority 7: Static/continuous patterns
@@ -4654,6 +4709,42 @@ mod tests {
             })
         );
         assert_eq!(r.triggers.len(), 1);
+    }
+
+    #[test]
+    fn old_aura_flash_drawback_parses_cleanup_sacrifice_trigger() {
+        let r = parse(
+            "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.\nEnchant creature\nEnchanted creature gets +1/+0.",
+            "Lightning Reflexes",
+            &[],
+            &["Enchantment"],
+            &["Aura"],
+        );
+
+        assert_eq!(
+            r.casting_options,
+            vec![SpellCastingOption::as_though_had_flash()]
+        );
+        assert_eq!(r.triggers.len(), 1);
+        assert!(matches!(
+            r.triggers[0].condition,
+            Some(TriggerCondition::CastTimingPermission {
+                permission: CastTimingPermission::AsThoughHadFlash,
+            })
+        ));
+        let delayed = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("cleanup trigger executes delayed trigger");
+        assert!(matches!(
+            *delayed.effect,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::Cleanup
+                },
+                ..
+            }
+        ));
     }
 
     #[test]

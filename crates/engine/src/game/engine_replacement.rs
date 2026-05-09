@@ -477,6 +477,9 @@ fn apply_pending_spell_resolution(
     // replacement / triggered abilities can gate on which kickers were paid.
     if let Some(obj) = state.objects.get_mut(&ctx.object_id) {
         obj.cast_from_zone = ctx.cast_from_zone;
+        if let Some(permission) = ctx.cast_timing_permission {
+            obj.cast_timing_permission = Some((permission, state.turn_number));
+        }
         obj.kickers_paid.clone_from(&ctx.kickers_paid);
         obj.convoked_creatures.clone_from(&ctx.convoked_creatures);
     }

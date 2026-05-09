@@ -2266,6 +2266,12 @@ pub(crate) fn check_trigger_condition(
             }),
         // CR 207.2c + CR 601.2: cast during the configured phase set.
         TriggerCondition::CastDuringPhase { phases } => phases.contains(&state.phase),
+        // CR 601.3b + CR 702.8a: source permanent came from a spell cast using
+        // the specified timing permission this turn.
+        TriggerCondition::CastTimingPermission { permission } => source_id
+            .and_then(|id| state.objects.get(&id))
+            .map(|obj| obj.cast_timing_permission == Some((*permission, state.turn_number)))
+            .unwrap_or(false),
         // CR 207.2c: Adamant — at least N mana of a specific color was spent to cast.
         // Reads the per-color tally recorded in casting::pay_mana_cost.
         TriggerCondition::ManaColorSpent { color, minimum } => source_id

@@ -3066,6 +3066,7 @@ fn apply_action(
                     pending.ability,
                     &pending.cost,
                     pending.casting_variant,
+                    pending.cast_timing_permission,
                     pending.origin_zone,
                     &mut events,
                 )?
@@ -7257,6 +7258,7 @@ mod tests {
             activation_ability_index: None,
             target_constraints: vec![],
             casting_variant: crate::types::game_state::CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,

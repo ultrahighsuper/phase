@@ -394,6 +394,7 @@ mod tests {
             activation_ability_index: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,

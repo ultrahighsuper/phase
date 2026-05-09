@@ -3181,6 +3181,16 @@ pub enum CastVariantPaid {
     Bestow,
 }
 
+/// CR 601.3b + CR 702.8a: A timing permission actually used to cast a spell.
+/// This is separate from `CastVariantPaid`: no alternative cost was paid, but
+/// later abilities may care that normal sorcery timing was bypassed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CastTimingPermission {
+    /// The spell was cast using an effect that allowed it to be cast as though
+    /// it had flash.
+    AsThoughHadFlash,
+}
+
 impl From<NinjutsuVariant> for CastVariantPaid {
     /// CR 702.49: Lift an activation-family variant into the cast-variant-paid tag
     /// used by trigger conditions. Cast alt-costs are intentionally NOT in
@@ -6594,6 +6604,9 @@ pub enum AbilityCondition {
     /// `phases` is parameterized so grouped phrases like "main phase" can map to
     /// both concrete main phases without proliferating condition variants.
     CastDuringPhase { phases: Vec<Phase> },
+    /// CR 601.3b + CR 702.8a: The source permanent came from a spell cast using
+    /// a specific timing permission this turn.
+    CastTimingPermission { permission: CastTimingPermission },
     /// CR 601.2h + CR 608.2c: "if {C} was spent to cast this spell" gates
     /// resolution on the source object's recorded paid-mana colors.
     ManaColorSpent { color: ManaColor, minimum: u32 },
@@ -7059,6 +7072,9 @@ pub enum TriggerCondition {
     /// `phases` is parameterized so grouped phrases like "main phase" can map to
     /// both concrete main phases without proliferating condition variants.
     CastDuringPhase { phases: Vec<Phase> },
+    /// CR 601.3b + CR 702.8a: The source permanent came from a spell cast using
+    /// a specific timing permission this turn.
+    CastTimingPermission { permission: CastTimingPermission },
     /// CR 207.2c: "if at least N mana of [color] was spent to cast this spell" — Adamant.
     ManaColorSpent { color: ManaColor, minimum: u32 },
     /// CR 601.2b: "if no mana was spent to cast it" / "if mana from a [source] was spent"

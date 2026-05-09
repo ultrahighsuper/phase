@@ -618,6 +618,8 @@ pub struct PendingCast {
     /// How this spell was cast — threads through the casting pipeline to finalize_cast.
     #[serde(default)]
     pub casting_variant: CastingVariant,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_timing_permission: Option<crate::types::ability::CastTimingPermission>,
     /// CR 601.2d: When set, after target selection the caster must distribute this
     /// resource (damage, counters, life) among the chosen targets via DistributeAmong.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -681,6 +683,7 @@ impl PendingCast {
             activation_ability_index: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
@@ -3165,6 +3168,8 @@ pub struct PendingSpellResolution {
     pub controller: PlayerId,
     pub casting_variant: CastingVariant,
     pub cast_from_zone: Option<crate::types::zones::Zone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_timing_permission: Option<crate::types::ability::CastTimingPermission>,
     pub spell_targets: Vec<crate::types::ability::TargetRef>,
     #[serde(default)]
     pub actual_mana_spent: u32,
@@ -3702,6 +3707,7 @@ mod tests {
                 activation_ability_index: None,
                 target_constraints: vec![],
                 casting_variant: CastingVariant::Normal,
+                cast_timing_permission: None,
                 distribute: None,
                 origin_zone: Zone::Hand,
                 additional_cost_flow: None,
@@ -3966,6 +3972,7 @@ mod tests {
             activation_ability_index: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,

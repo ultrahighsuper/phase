@@ -2206,6 +2206,11 @@ fn evaluate_condition(
             .context
             .cast_phase
             .is_some_and(|cast_phase| phases.contains(&cast_phase)),
+        AbilityCondition::CastTimingPermission { permission } => state
+            .objects
+            .get(&ability.source_id)
+            .map(|obj| obj.cast_timing_permission == Some((*permission, state.turn_number)))
+            .unwrap_or(false),
         // CR 601.2h + CR 608.2c: Spend-color riders read the resolving spell
         // object's recorded mana payment. Spell copies with no mana paid
         // naturally fail because their tally is empty.
