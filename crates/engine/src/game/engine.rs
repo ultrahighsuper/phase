@@ -11199,6 +11199,40 @@ mod phase_trigger_regression_tests {
     }
 
     #[test]
+    fn unless_energy_payment_deducts_energy_and_skips_effect() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Energy Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.players[0].energy = 2;
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: UnlessCost::PayEnergy { amount: 2 },
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: crate::types::ability::GainLifePlayer::Controller,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            )),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.players[0].energy, 0);
+        assert_eq!(state.players[0].life, 20);
+    }
+
+    #[test]
     fn unless_discard_payment_filters_eligible_hand_cards() {
         let mut state = setup_game_at_main_phase();
         let source_id = create_object(

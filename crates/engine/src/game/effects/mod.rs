@@ -1522,6 +1522,7 @@ pub fn resolve_ability_chain(
             // mana resolution — pass through to UnlessPayment directly.
             match &unless_pay.cost {
                 UnlessCost::PayLife { .. }
+                | UnlessCost::PayEnergy { .. }
                 | UnlessCost::DiscardCard { .. }
                 | UnlessCost::Sacrifice { .. }
                 | UnlessCost::ReturnToHand { .. } => {
@@ -1551,6 +1552,7 @@ pub fn resolve_ability_chain(
                 }
                 // Non-mana costs handled above.
                 UnlessCost::PayLife { .. }
+                | UnlessCost::PayEnergy { .. }
                 | UnlessCost::DiscardCard { .. }
                 | UnlessCost::Sacrifice { .. }
                 | UnlessCost::ReturnToHand { .. } => unreachable!(),

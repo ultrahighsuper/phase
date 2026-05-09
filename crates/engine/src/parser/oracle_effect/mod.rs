@@ -12042,6 +12042,11 @@ fn parse_unless_payment(lower: &str) -> Option<UnlessCost> {
     if cost_text.is_empty() || !cost_text.contains('{') {
         return None;
     }
+    if let Some((amount, rest)) = parse_fixed_energy_unless_cost(cost_text) {
+        if rest.trim().is_empty() {
+            return Some(UnlessCost::PayEnergy { amount });
+        }
+    }
     // Check for dynamic {X} with "where X is" clause
     if cost_text == "{X}" || cost_text == "{x}" {
         let after_cost = &cost_str[cost_end..];
@@ -12107,6 +12112,12 @@ fn parse_resolution_unless_payer(input: &str) -> OracleResult<'_, TargetFilter> 
 }
 
 fn parse_resolution_unless_cost(cost_text: &str) -> Option<UnlessCost> {
+    if let Some((amount, rest)) = parse_fixed_energy_unless_cost(cost_text.trim_start()) {
+        if rest.trim().is_empty() {
+            return Some(UnlessCost::PayEnergy { amount });
+        }
+    }
+
     if let Ok((rest, cost)) = nom_primitives::parse_mana_cost(cost_text.trim_start()) {
         if let Some(unless_cost) = parse_unless_for_each_payment(rest, &cost) {
             return Some(unless_cost);
@@ -12127,6 +12138,13 @@ fn parse_resolution_unless_cost(cost_text: &str) -> Option<UnlessCost> {
     }
 
     None
+}
+
+pub(crate) fn parse_fixed_energy_unless_cost(input: &str) -> Option<(u32, &str)> {
+    let (rest, symbols) = many1(tag::<_, _, OracleError<'_>>("{e}"))
+        .parse(input)
+        .ok()?;
+    Some((u32::try_from(symbols.len()).ok()?, rest))
 }
 
 pub(crate) fn parse_unless_for_each_payment(

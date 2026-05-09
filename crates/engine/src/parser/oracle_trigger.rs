@@ -802,6 +802,7 @@ fn strip_constraint_sentences(text: &str) -> String {
 /// - "sacrifice it unless you discard a card at random"  (CR 608.2c — UnlessCost::DiscardCard)
 /// - "destroy it unless you sacrifice a creature"        (UnlessCost::Sacrifice)
 /// - "draw a card unless you pay 2 life"                 (CR 119.4 — UnlessCost::PayLife)
+/// - "sacrifice it unless you pay {E}{E}"                (CR 107.14 — UnlessCost::PayEnergy)
 fn extract_unless_pay_modifier(
     text: &str,
     condition_lower: &str,
@@ -838,10 +839,9 @@ fn extract_unless_pay_modifier(
     }
 
     // CR 118.12 + CR 608.2c + CR 119.4: Non-mana alternative costs ("you discard
-    // a card", "you sacrifice a [filter]", "you pay N life") map to the existing
-    // `UnlessCost::{DiscardCard, Sacrifice, PayLife}` variants — the runtime
-    // resolver in `engine_payment_choices.rs` already handles all four via
-    // `WaitingFor::WardDiscardChoice` / `WaitingFor::WardSacrificeChoice`.
+    // a card", "you sacrifice a [filter]", "you pay N life") map to existing
+    // `UnlessCost` variants — the runtime resolver in `engine_payment_choices.rs`
+    // owns the payment choice.
     if let Some(cost) = parse_unless_alt_cost(after_unless) {
         let cleaned = text[..unless_pos].trim().to_string();
         return (
@@ -900,7 +900,14 @@ fn extract_unless_pay_modifier(
     }
 
     // Determine the cost type
-    let cost = if cost_text == "{x}" || cost_text == "{X}" {
+    let cost = if let Some((amount, rest)) =
+        super::oracle_effect::parse_fixed_energy_unless_cost(cost_text)
+    {
+        if !rest.trim().is_empty() {
+            return (text.to_string(), None);
+        }
+        UnlessCost::PayEnergy { amount }
+    } else if cost_text == "{x}" || cost_text == "{X}" {
         // Check for "where X is" clause
         let remainder = &cost_str[cost_end..];
         if let Some(quantity) = parse_where_x_is_trigger(remainder) {
@@ -9498,6 +9505,23 @@ mod tests {
             unless_pay.cost
         );
         // The effect text should be stripped of the unless clause
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(*execute.effect, Effect::Sacrifice { .. }),
+            "execute should be Sacrifice, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_pay_energy() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, sacrifice this creature unless you pay {E}{E}.",
+            "Lathnu Hellion",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        assert_eq!(unless_pay.cost, UnlessCost::PayEnergy { amount: 2 });
         let execute = def.execute.as_ref().expect("should have execute");
         assert!(
             matches!(*execute.effect, Effect::Sacrifice { .. }),

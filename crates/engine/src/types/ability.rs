@@ -3509,6 +3509,8 @@ pub enum UnlessCost {
     DynamicGeneric { quantity: QuantityExpr },
     /// CR 702.21a: Pay life as ward cost (e.g., "Ward—Pay 2 life")
     PayLife { amount: i32 },
+    /// CR 107.14 + CR 118.12: Remove fixed energy counters as an unless cost.
+    PayEnergy { amount: u32 },
     /// CR 701.9 + CR 702.21a: The resolved `UnlessPayModifier::payer`
     /// discards a card as an unless/ward cost. `filter: None` means any card
     /// in that payer's hand is eligible; `Some` restricts the eligible hand
