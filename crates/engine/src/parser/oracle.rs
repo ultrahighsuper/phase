@@ -6034,6 +6034,30 @@ mod tests {
     }
 
     #[test]
+    fn modal_activated_ability_preserves_activation_restrictions() {
+        let r = parse(
+            "{G}: Choose one. Activate only once each turn.\n\
+             • Until end of turn, this creature becomes a Rhino with base power and toughness 4/4 and gains trample.\n\
+             • Until end of turn, this creature becomes a Bird with base power and toughness 2/2 and gains flying.",
+            "Test Shifter",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        let modal_def = r
+            .abilities
+            .iter()
+            .find(|ability| ability.modal.is_some())
+            .expect("should have a modal activated ability");
+        assert!(
+            modal_def
+                .activation_restrictions
+                .contains(&ActivationRestriction::OnlyOnceEachTurn),
+            "modal activated ability should preserve once-per-turn restriction"
+        );
+    }
+
+    #[test]
     fn modal_activated_ability_uses_normalized_mode_bodies() {
         let r = parse(
             "{1}, {T}: Choose one —\n• Alpha — Draw a card.\n• Beta — Gain 3 life.",

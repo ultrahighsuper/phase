@@ -1028,6 +1028,7 @@ pub(crate) enum OracleBlockAst {
         cost_text: String,
         header: ModalHeaderAst,
         modes: Vec<ModeAst>,
+        constraints: ActivatedConstraintAst,
     },
     Modal {
         header: ModalHeaderAst,
