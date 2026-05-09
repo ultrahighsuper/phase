@@ -582,6 +582,9 @@ fn draw_replacement_count(
 
 // --- 4b. Scry ---
 
+// CR 614.6: A replacement effect applies only once to a given event. The
+// `applied: HashSet<ReplacementId>` carried in the event prevents the
+// pipeline from re-entering the same effect on the modified event.
 fn scry_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::Scry { count, .. } if *count > 0)
 }
@@ -1208,6 +1211,9 @@ fn dealt_damage_applier(
 
 // --- 17. Mill ---
 
+// CR 614.6: A replacement effect applies only once to a given event. The
+// `applied: HashSet<ReplacementId>` carried in the event prevents the
+// pipeline from re-entering the same effect on the modified event.
 fn mill_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(
         event,

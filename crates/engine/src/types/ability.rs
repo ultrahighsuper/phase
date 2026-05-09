@@ -7,7 +7,9 @@ use thiserror::Error;
 use super::card_type::{CardType, CoreType, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
-use super::game_state::{DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope};
+use super::game_state::{
+    is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
+};
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaType};
@@ -5009,10 +5011,6 @@ fn default_one() -> u32 {
 
 fn default_one_i32() -> i32 {
     1
-}
-
-fn is_zero_usize(value: &usize) -> bool {
-    *value == 0
 }
 
 fn default_player_filter_controller() -> PlayerFilter {

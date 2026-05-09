@@ -7672,7 +7672,7 @@ mod tests {
         assert_eq!(rest, "");
     }
 
-    /// CR 108.3 + CR 109.5: ownership and control are distinct. "You control
+    /// CR 108.3 + CR 110.2: ownership and control are distinct. "You control
     /// but don't own" must match permanents controlled by you while excluding
     /// objects you own, so stolen objects count and native objects do not.
     #[test]

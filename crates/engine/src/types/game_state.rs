@@ -43,7 +43,7 @@ fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
-fn is_zero_usize(value: &usize) -> bool {
+pub(crate) fn is_zero_usize(value: &usize) -> bool {
     *value == 0
 }
 
