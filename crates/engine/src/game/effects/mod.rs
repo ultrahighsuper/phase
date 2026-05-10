@@ -6455,6 +6455,7 @@ mod tests {
                         player: PlayerScope::Controller,
                     },
                     granted_to: PlayerId(0),
+                    mana_spend_permission: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),

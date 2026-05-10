@@ -344,6 +344,7 @@ pub fn room_effects(
                         // Placeholder — rewritten to ability.controller at
                         // grant time by `grant_permission::resolve`.
                         granted_to: crate::types::player::PlayerId(0),
+                        mana_spend_permission: None,
                     },
                     target: TargetFilter::Any,
                     grantee: Default::default(),

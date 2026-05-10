@@ -2338,7 +2338,11 @@ fn auto_tap_mana_sources_inner(
     // `reduce_cost_by_pool`, which mirrors the real payment path.
     let spell_meta =
         deprioritize_source.and_then(|sid| super::casting::build_spell_meta(state, player, sid));
-    let any_color = super::static_abilities::player_can_spend_as_any_color(state, player);
+    let any_color = super::casting::player_can_spend_as_any_color_for_optional_spell(
+        state,
+        player,
+        deprioritize_source,
+    );
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     let residual = state
         .players
@@ -3145,7 +3149,8 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
 
     let spell_meta = super::casting::build_spell_meta(state, player, source_id);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
-    let any_color = super::static_abilities::player_can_spend_as_any_color(state, player);
+    let any_color =
+        super::casting::player_can_spend_as_any_color_for_spell(state, player, source_id);
     let max_life = super::life_costs::max_phyrexian_life_payments(state, player);
 
     let shards = {

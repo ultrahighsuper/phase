@@ -109,6 +109,7 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
                         player: PlayerScope::Controller,
                     },
                 granted_to,
+                ..
             } => *granted_to != active_player,
             CastingPermission::PlayFromExile { .. }
             | CastingPermission::AdventureCreature
@@ -4781,6 +4782,7 @@ mod tests {
             .push(CastingPermission::PlayFromExile {
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
+                mana_spend_permission: None,
             });
 
         prune_end_of_turn_casting_permissions(&mut state);
@@ -4801,10 +4803,12 @@ mod tests {
                 player: PlayerScope::Controller,
             },
             granted_to: PlayerId(0),
+            mana_spend_permission: None,
         });
         perms.push(CastingPermission::PlayFromExile {
             duration: Duration::Permanent,
             granted_to: PlayerId(0),
+            mana_spend_permission: None,
         });
         perms.push(CastingPermission::AdventureCreature);
 
@@ -4832,6 +4836,7 @@ mod tests {
                     player: PlayerScope::Controller,
                 },
                 granted_to: PlayerId(0),
+                mana_spend_permission: None,
             });
         state
             .objects
@@ -4843,6 +4848,7 @@ mod tests {
                     player: PlayerScope::Controller,
                 },
                 granted_to: PlayerId(1),
+                mana_spend_permission: None,
             });
 
         // Active player is P0 — only P0's permission should expire.
@@ -4871,6 +4877,7 @@ mod tests {
             .push(CastingPermission::PlayFromExile {
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
+                mana_spend_permission: None,
             });
 
         prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));

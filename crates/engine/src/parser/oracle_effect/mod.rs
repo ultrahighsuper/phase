@@ -45,11 +45,11 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, ConjureCard, ContinuousModification,
     ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, GainLifePlayer, GameRestriction, ManaProduction, MultiTargetSpec, ObjectScope,
-    PlayerFilter, PlayerScope, PreventionAmount, PtValue, QuantityExpr, QuantityRef,
-    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
-    StaticCondition, StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost, UnlessPayModifier,
+    FilterProp, GainLifePlayer, GameRestriction, ManaProduction, ManaSpendPermission,
+    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PreventionAmount, PtValue,
+    QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
+    RoundingMode, StaticCondition, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessCost, UnlessPayModifier,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
@@ -3427,11 +3427,61 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
             duration,
             // Placeholder — `grant_permission::resolve` normalizes per-iteration.
             granted_to: crate::types::player::PlayerId(0),
+            mana_spend_permission: None,
         },
         target: TargetFilter::TrackedSet {
             id: TrackedSetId(0),
         },
         grantee,
+    }))
+}
+
+fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("you may look at and play "),
+        tag("you may play "),
+        tag("you may cast "),
+        tag("look at and play "),
+        tag("play "),
+        tag("cast "),
+    ))
+    .parse(tp.lower)
+    .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that card"),
+        tag("that spell"),
+        tag("those cards"),
+        tag("it"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" for as long as ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it remains exiled"),
+        tag("that card remains exiled"),
+        tag("those cards remain exiled"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(", and ").parse(rest).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("mana of any type can be spent to cast that spell"),
+        tag("mana of any color can be spent to cast that spell"),
+    ))
+    .parse(rest)
+    .ok()?;
+    eof::<_, OracleError<'_>>(rest).ok()?;
+
+    Some(parsed_clause(Effect::GrantCastingPermission {
+        permission: CastingPermission::PlayFromExile {
+            duration: Duration::Permanent,
+            granted_to: crate::types::player::PlayerId(0),
+            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+        },
+        target: TargetFilter::Any,
+        grantee: Default::default(),
     }))
 }
 
@@ -3445,6 +3495,9 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
     // `grant_permission::resolve`. The target is `TrackedSet` — the most
     // recently published set (the exiled cards from the parent effect).
     if let Some(clause) = try_parse_per_grantee_play_grant(tp) {
+        return Some(clause);
+    }
+    if let Some(clause) = try_parse_exile_play_grant_with_any_mana(tp) {
         return Some(clause);
     }
 
@@ -3507,6 +3560,7 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
             // Placeholder — `grant_permission::resolve` rewrites this to the
             // ability's controller at grant time (CR 611.2a/b).
             granted_to: crate::types::player::PlayerId(0),
+            mana_spend_permission: None,
         },
         target: TargetFilter::Any,
         grantee: Default::default(),
@@ -18226,6 +18280,45 @@ mod tests {
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
                     duration: Duration::UntilEndOfTurn,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_play_from_exile_while_exiled_with_any_mana_permission() {
+        let def = parse_effect_chain(
+            "You may cast that card for as long as it remains exiled, and mana of any type can be spent to cast that spell.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            &*def.effect,
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                    ..
+                },
+                target: TargetFilter::Any,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_look_at_and_play_from_exile_while_exiled_with_any_mana_permission() {
+        let def = parse_effect_chain(
+            "You may look at and play that card for as long as it remains exiled, and mana of any type can be spent to cast that spell.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            &*def.effect,
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                     ..
                 },
                 ..

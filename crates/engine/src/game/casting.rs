@@ -247,11 +247,14 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         );
     }
 
-    // CR 715.3d: Cards in exile with casting permissions are castable by their owner.
+    // CR 715.3d + CR 400.7i: Cards in exile with casting permissions are
+    // castable by their owner, except PlayFromExile binds to the player the
+    // resolving effect granted the permission to.
     objects.extend(state.exile.iter().copied().filter(|&obj_id| {
-        state.objects.get(&obj_id).is_some_and(|obj| {
-            obj.owner == player && has_exile_cast_permission(obj, state.turn_number)
-        })
+        state
+            .objects
+            .get(&obj_id)
+            .is_some_and(|obj| has_exile_cast_permission(obj, player, state.turn_number))
     }));
 
     // CR 601.2a: Opponent's exiled cards with ExileWithAltCost are castable by any player.
@@ -621,27 +624,64 @@ fn effective_spell_keyword_kinds(
 
 /// Check if an object has any permission allowing it to be cast from exile.
 /// Uses explicit match arms (not `matches!`) so the compiler catches new variants.
-fn has_exile_cast_permission(obj: &crate::game::game_object::GameObject, turn_number: u32) -> bool {
+fn has_exile_cast_permission(
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    turn_number: u32,
+) -> bool {
     obj.casting_permissions.iter().any(|p| match p {
         crate::types::ability::CastingPermission::AdventureCreature
         | crate::types::ability::CastingPermission::ExileWithAltCost { .. }
         | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
-        | crate::types::ability::CastingPermission::PlayFromExile { .. }
-        | crate::types::ability::CastingPermission::ExileWithEnergyCost => true,
+        | crate::types::ability::CastingPermission::ExileWithEnergyCost => obj.owner == player,
+        crate::types::ability::CastingPermission::PlayFromExile { granted_to, .. } => {
+            *granted_to == player
+        }
         // CR 702.185a: Warp cards only castable after the exile turn ends.
         crate::types::ability::CastingPermission::WarpExile {
             castable_after_turn,
-        } => turn_number > *castable_after_turn,
+        } => obj.owner == player && turn_number > *castable_after_turn,
         // CR 702.170d: Plotted cards only castable on a later turn than the
         // one they became plotted on (owner's main phase, empty stack — those
         // conditions are enforced separately by sorcery-speed timing).
         crate::types::ability::CastingPermission::Plotted { turn_plotted } => {
-            turn_number > *turn_plotted
+            obj.owner == player && turn_number > *turn_plotted
         }
         crate::types::ability::CastingPermission::Foretold { turn_foretold, .. } => {
-            turn_number > *turn_foretold
+            obj.owner == player && turn_number > *turn_foretold
         }
     })
+}
+
+pub(super) fn player_can_spend_as_any_color_for_spell(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    player_can_spend_as_any_color_for_optional_spell(state, player, Some(source_id))
+}
+
+pub(super) fn player_can_spend_as_any_color_for_optional_spell(
+    state: &GameState,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+) -> bool {
+    super::static_abilities::player_can_spend_as_any_color(state, player)
+        || source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| {
+                obj.casting_permissions.iter().any(|permission| {
+                    matches!(
+                        permission,
+                        crate::types::ability::CastingPermission::PlayFromExile {
+                            granted_to,
+                            mana_spend_permission:
+                                Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor),
+                            ..
+                        } if *granted_to == player
+                    )
+                })
+            })
 }
 
 /// CR 601.2a: Check if an object has an alt-cost cast-from-exile permission
@@ -1060,7 +1100,7 @@ fn prepare_spell_cast_with_variant_override(
         .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
     // CR 715.3d: Cards in exile with AdventureCreature or ExileWithAltCost permission.
     let has_exile_permission =
-        obj.zone == Zone::Exile && has_exile_cast_permission(obj, state.turn_number);
+        obj.zone == Zone::Exile && has_exile_cast_permission(obj, player, state.turn_number);
     let has_madness = obj.zone == Zone::Exile
         && matches!(variant_override, Some(CastingVariant::Madness))
         && obj.owner == player
@@ -1103,13 +1143,13 @@ fn prepare_spell_cast_with_variant_override(
     let has_unowned_exile_permission =
         obj.zone == Zone::Exile && obj.owner != player && has_alt_cost_permission(obj);
     let castable_zone = has_unowned_exile_permission
+        || has_exile_permission
         || (obj.owner == player
             && (obj.zone == Zone::Hand
                 || (state.format_config.command_zone
                     && obj.zone == Zone::Command
                     && obj.is_commander)
                 || has_madness
-                || has_exile_permission
                 || has_graveyard_cast_keyword
                 || has_graveyard_permission
                 || has_top_of_library_permission));
@@ -3804,7 +3844,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
         super::triggers::process_triggers(&mut simulated, &tap_events);
     }
 
-    let any_color = super::static_abilities::player_can_spend_as_any_color(&simulated, player);
+    let any_color = player_can_spend_as_any_color_for_spell(&simulated, player, source_id);
     // CR 107.4f + CR 118.3 + CR 119.8: Include the payer's Phyrexian life
     // budget so a cost containing {C/P} shards is only reported payable when
     // either mana or sufficient life (respecting CantLoseLife) is available.
@@ -4031,7 +4071,7 @@ fn auto_tap_and_pay_cost(
             .iter()
             .find(|p| p.id == player)
             .expect("player exists");
-        let any_color = super::static_abilities::player_can_spend_as_any_color(state, player);
+        let any_color = player_can_spend_as_any_color_for_spell(state, player, source_id);
         // CR 107.4f + CR 118.3 + CR 119.8: Life budget for Phyrexian shards —
         // respects CantLoseLife (budget 0 under lock) and current life total.
         let max_life = super::life_costs::max_phyrexian_life_payments(state, player);
@@ -4043,7 +4083,7 @@ fn auto_tap_and_pay_cost(
         }
     }
 
-    let any_color = super::static_abilities::player_can_spend_as_any_color(state, player);
+    let any_color = player_can_spend_as_any_color_for_spell(state, player, source_id);
     let hand_demand = mana_payment::compute_hand_color_demand(state, player, source_id);
     let player_data = state
         .players
@@ -5833,9 +5873,9 @@ mod tests {
         ActivationRestriction, BasicLandType, CastVariantPaid, CastingPermission, ChosenAttribute,
         ChosenSubtypeKind, ContinuousModification, ControllerRef, CostCategory, FilterProp,
         GainLifePlayer, GameRestriction, KickerVariant, ManaContribution, ManaProduction,
-        ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr, RestrictionExpiry,
-        RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition, StaticDefinition,
-        TargetFilter, TypeFilter, TypedFilter,
+        ManaSpendPermission, ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr,
+        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition,
+        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -8513,6 +8553,7 @@ mod tests {
                 .push(crate::types::ability::CastingPermission::PlayFromExile {
                     duration: crate::types::ability::Duration::Permanent,
                     granted_to: PlayerId(0),
+                    mana_spend_permission: None,
                 });
         }
 
@@ -8526,6 +8567,49 @@ mod tests {
                 convoke_mode: Some(ConvokeMode::Convoke),
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn play_from_exile_grant_binds_to_grantee_and_carries_any_mana_permission() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_object(
+            &mut state,
+            CardId(29),
+            PlayerId(1),
+            "Borrowed Blue Spell".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            };
+            obj.casting_permissions
+                .push(CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    granted_to: PlayerId(0),
+                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                });
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        assert!(spell_objects_available_to_cast(&state, PlayerId(0)).contains(&obj_id));
+        assert!(!spell_objects_available_to_cast(&state, PlayerId(1)).contains(&obj_id));
+        assert!(can_pay_cost_after_auto_tap(
+            &state,
+            PlayerId(0),
+            obj_id,
+            &state.objects[&obj_id].mana_cost
         ));
     }
 

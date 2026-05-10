@@ -1977,7 +1977,7 @@ fn apply_action(
                 let cost = pending_ref.cost.clone();
                 let spell_meta = casting::build_spell_meta(state, player, spell_object);
                 let any_color =
-                    super::static_abilities::player_can_spend_as_any_color(state, player);
+                    casting::player_can_spend_as_any_color_for_spell(state, player, spell_object);
                 let max_life = super::life_costs::max_phyrexian_life_payments(state, player);
                 let player_pool = state
                     .players

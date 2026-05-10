@@ -1343,6 +1343,24 @@ fn detect_condition_as_long_as(
     if !cleaned.contains("as long as ") {
         return;
     }
+    // CR 400.7i + CR 609.4b: "play/cast that card for as long as it remains
+    // exiled, and mana ..." is represented as a zone-scoped PlayFromExile
+    // permission on the exiled object. The permission is stored with
+    // Duration::Permanent because zones::apply_zone_exit_cleanup removes it
+    // when the card stops being the exiled object this effect refers to.
+    let exile_duration_clause_recognized = [
+        "as long as it remains exiled",
+        "as long as that card remains exiled",
+        "as long as those cards remain exiled",
+    ]
+    .iter()
+    .any(|phrase| cleaned.contains(phrase));
+    if exile_duration_clause_recognized
+        && json_has_any(ast_json, &["\"type\":\"PlayFromExile\""])
+        && json_has_any(ast_json, &["\"duration\":\"Permanent\""])
+    {
+        return;
+    }
     let markers: &[&str] = &[
         "\"condition\":{",
         "\"AsLongAs\"",

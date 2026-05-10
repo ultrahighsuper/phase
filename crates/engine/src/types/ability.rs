@@ -1079,6 +1079,12 @@ pub enum CastingPermission {
     PlayFromExile {
         duration: Duration,
         granted_to: PlayerId,
+        /// CR 609.4b: Optional payment permission carried by the same effect
+        /// that allows the card to be played/cast from exile. This scopes
+        /// "mana of any type can be spent to cast that spell" to the exiled
+        /// card rather than creating a global player permission.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mana_spend_permission: Option<ManaSpendPermission>,
     },
     /// CR 122.3: Cast from exile by paying {E} equal to the card's mana value.
     /// Building block for Amped Raptor and similar energy-based casting mechanics.
@@ -1122,6 +1128,15 @@ pub enum CastingPermission {
     /// when the special action resolves; the permission is scoped to the exile
     /// zone and cleared when the object leaves exile.
     Foretold { cost: ManaCost, turn_foretold: u32 },
+}
+
+/// CR 609.4b: Permission modifying how mana may be spent to pay a cost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManaSpendPermission {
+    /// Mana may be spent as though it were mana of any type or color for this
+    /// payment. This preserves the Oracle distinction without changing the
+    /// actual mana spent.
+    AnyTypeOrColor,
 }
 
 /// CR 611.2a + CR 108.3: Identifies which player a `CastingPermission` is granted
