@@ -1466,9 +1466,11 @@ pub fn synthesize_fabricate(face: &mut CardFace) {
 ///     default `under_your_control = false` matches the rule's "under its
 ///     owner's control" exactly.
 ///
-/// Per CR 702.93b ("If a permanent has multiple instances of undying, each
-/// triggers separately"), every `Keyword::Undying` on the face emits a
-/// distinct trigger.
+/// Per CR 113.2c ("If an object has multiple instances of the same ability,
+/// each instance functions independently") combined with the absence of a
+/// redundancy clause in CR 702.93 (compare CR 702.2f for deathtouch and
+/// CR 702.9c for flying, which explicitly mark those keywords as redundant),
+/// every `Keyword::Undying` on the face emits a distinct trigger.
 ///
 /// Sibling of `synthesize_persist` — both share this dies-trigger shape and
 /// differ only in counter polarity (CR 702.79a vs CR 702.93a). They are kept
@@ -1484,8 +1486,9 @@ pub fn synthesize_undying(face: &mut CardFace) {
 /// under its owner's control with a -1/-1 counter on it."
 ///
 /// Mirror of `synthesize_undying` with -1/-1 counters (`CounterType::Minus1Minus1`
-/// → `"M1M1"`). Per CR 702.79b every `Keyword::Persist` instance triggers
-/// separately, so one synthesized trigger is emitted per keyword on the face.
+/// → `"M1M1"`). Per CR 113.2c and the absence of a redundancy clause in
+/// CR 702.79, every `Keyword::Persist` instance functions independently, so
+/// one synthesized trigger is emitted per keyword on the face.
 pub fn synthesize_persist(face: &mut CardFace) {
     synthesize_dies_return_with_counter(face, &Keyword::Persist, "M1M1", "-1/-1", "702.79a");
 }
@@ -1506,8 +1509,11 @@ fn synthesize_dies_return_with_counter(
     counter_label: &str,
     cr_ref: &str,
 ) {
-    // Count keyword instances on the face (CR 702.93b / CR 702.79b: each
-    // instance triggers separately).
+    // Count keyword instances on the face. Per CR 113.2c ("If an object has
+    // multiple instances of the same ability, each instance functions
+    // independently") and the absence of an Undying/Persist redundancy
+    // clause (compare CR 702.2f / CR 702.9c), each keyword instance emits a
+    // distinct trigger.
     let instances = face.keywords.iter().filter(|kw| *kw == keyword).count();
     if instances == 0 {
         return;
@@ -3449,9 +3455,10 @@ mod undying_persist_synthesis_tests {
         assert!(face.triggers.is_empty());
     }
 
-    /// CR 702.93b: Multiple instances of Undying trigger separately.
-    /// No printed card today has multiple Undying keywords; the test pins
-    /// the rule shape so a future printing routes correctly.
+    /// CR 113.2c + absence of redundancy clause in CR 702.93: multiple
+    /// instances of Undying each function independently and so each emit a
+    /// trigger. No printed card today has multiple Undying keywords; the
+    /// test pins the rule shape so a future printing routes correctly.
     #[test]
     fn synthesize_undying_emits_one_trigger_per_instance() {
         let mut face = CardFace::default();
@@ -3680,11 +3687,22 @@ mod undying_persist_runtime_tests {
     /// CR 603 multi-trigger semantics: a permanent that carries BOTH Undying
     /// and Persist (a contrived dual-keyword card) puts both triggers on the
     /// stack on death. The first to resolve returns the permanent to the
-    /// battlefield. The second-to-resolve finds the (new-object) source no
-    /// longer in the graveyard, so its self-ref `Effect::ChangeZone` is a
-    /// no-op — the permanent is NOT double-returned. The post-condition
-    /// here is simply that the permanent ends up on the battlefield exactly
-    /// once after both triggers process.
+    /// battlefield.
+    ///
+    /// The engine reuses `obj_id` for the returned permanent (CR 400.7 makes
+    /// it a new game object conceptually, but the implementation preserves
+    /// the `ObjectId` across the zone change). When the second trigger
+    /// resolves, its `Effect::ChangeZone` evaluates `from_zone =
+    /// Zone::Battlefield`, which fails the `expected_origin ==
+    /// Some(Zone::Graveyard)` guard at `change_zone.rs:501-505` and the
+    /// move silently no-ops. `enter_with_counters` runs only on a successful
+    /// move, so the second trigger places no counter either.
+    ///
+    /// Post-condition pinned by this test: exactly one battlefield object
+    /// with the name, and exactly ONE counter (polarity = whichever trigger
+    /// resolved first). Asserting the counter total catches a future
+    /// regression in which the origin guard is weakened and the second
+    /// trigger's `enter_with_counters` accidentally executes.
     #[test]
     fn undying_and_persist_together_on_same_face_does_not_double_return() {
         let mut face = CardFace {
@@ -3712,9 +3730,6 @@ mod undying_persist_runtime_tests {
         }
 
         let obj = state.objects.get(&obj_id).expect("object still tracked");
-        // The permanent is on the battlefield exactly once (single object id,
-        // single zone). The total counter count varies depending on stack
-        // ordering — but the count of physical objects with this id is one.
         assert_eq!(obj.zone, Zone::Battlefield);
         let count_in_battlefield = state
             .objects
@@ -3724,6 +3739,97 @@ mod undying_persist_runtime_tests {
         assert_eq!(
             count_in_battlefield, 1,
             "dual-keyword permanent must not be double-returned"
+        );
+        // The origin guard at change_zone.rs:501-505 prevents the
+        // second-to-resolve trigger from executing its move, so its
+        // `enter_with_counters` never runs. Exactly one counter ends up on
+        // the returned permanent (polarity = whichever trigger resolved
+        // first).
+        let total_counters: u32 = obj.counters.values().sum();
+        assert_eq!(
+            total_counters, 1,
+            "exactly one counter from the first-resolved trigger; the origin guard prevents the second"
+        );
+    }
+
+    /// CR 702.79a "under its owner's control" — the returned permanent must
+    /// route to its OWNER, not the controller at the moment of death.
+    ///
+    /// Setup: a Persist creature owned by player 0 but with `controller`
+    /// directly set to player 1 (a synthetic stand-in for the
+    /// Threaten / Act-of-Treason class — no live control-changing layered
+    /// effect is installed, so the post-return layers pass resets controller
+    /// to owner via CR 613.1b). Kill it, drain the trigger, run SBAs so the
+    /// `state.layers_dirty` flag set by the return-zone-change is consumed.
+    /// Assert the returned permanent ends under player 0's control.
+    ///
+    /// This pins the `under_your_control: false` field's "send to owner"
+    /// semantics: without it, a control-grab would steal the Persist /
+    /// Undying creature permanently on death. The assertion guards the
+    /// composition of:
+    ///   * `ctrl_override = None` in `effects/change_zone.rs:515-519`
+    ///     (because `under_your_control == false`).
+    ///   * No direct controller mutation in `move_to_zone` /
+    ///     `deliver_replaced_zone_change`.
+    ///   * Layer 2 (control-changing) reset to owner during the next
+    ///     `evaluate_layers` pass (`layers.rs:523` — CR 613.1b).
+    #[test]
+    fn persist_returns_under_owner_not_controller_after_control_grab() {
+        // Use a 2/2 base so the post-return -1/-1 counter doesn't push the
+        // permanent to 0 toughness — otherwise the SBA pass we run below
+        // (to force a layers re-evaluation) would send it back to the
+        // graveyard before the owner-vs-controller assertion.
+        let mut face = CardFace {
+            name: "Stolen Finks".to_string(),
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(2)),
+            keywords: vec![Keyword::Persist],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        let (mut state, obj_id) = setup_with_creature(&face, PlayerId(0));
+
+        // CR 110.2: Simulate a Threaten-style temporary control swap so the
+        // creature is OWNED by player 0 but CONTROLLED by player 1 at the
+        // moment it dies. (Two-player state from `setup_with_creature` gives
+        // us PlayerId(0) and PlayerId(1).)
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            assert_eq!(obj.owner, PlayerId(0), "precondition: owner is P0");
+            obj.controller = PlayerId(1);
+        }
+
+        let _ = kill_and_resolve(&mut state, obj_id);
+
+        // CR 704.3: Run SBAs so the layers pass triggered by the return
+        // zone-change (which sets `state.layers_dirty = true` in
+        // `effects/change_zone.rs:52`) actually evaluates. Layer 2 resets
+        // `controller` to `owner` per CR 613.1b for any battlefield object
+        // without an active control-changing continuous effect.
+        let mut sba_events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+
+        let obj = state.objects.get(&obj_id).expect("object still tracked");
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "persist returns the permanent to the battlefield"
+        );
+        // CR 702.79a "under its owner's control" — owner wins over the
+        // pre-death controller. `under_your_control: false` on the
+        // `Effect::ChangeZone` causes `move_to_zone` not to write any
+        // controller override; CR 613.1b then resets controller to owner
+        // during the next layers pass.
+        assert_eq!(
+            obj.owner,
+            PlayerId(0),
+            "owner unchanged across the zone round-trip"
+        );
+        assert_eq!(
+            obj.controller,
+            PlayerId(0),
+            "persist must return under its owner's control, not under the death-time controller"
         );
     }
 }
