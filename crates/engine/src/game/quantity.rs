@@ -1084,6 +1084,13 @@ fn resolve_ref(
             .unwrap_or(0),
         // CR 603.7c: Power of the source object from the triggering event.
         // CR 400.7: Falls back to LKI cache for objects that have left their zone.
+        // CR 400.7j + CR 117.1 + CR 608.2k: When no trigger event is in scope
+        // (activated abilities with a cost-paid object referent like Greater
+        // Good's "the sacrificed creature's power"), fall back to the
+        // resolving ability's `cost_paid_object` snapshot captured at cost
+        // payment. The same Oracle phrase semantically refers to one LKI
+        // snapshot regardless of whether the surrounding ability is triggered
+        // or activated.
         QuantityRef::EventContextSourcePower => state
             .current_trigger_event
             .as_ref()
@@ -1095,8 +1102,15 @@ fn resolve_ref(
                     .and_then(|obj| obj.power)
                     .or_else(|| state.lki_cache.get(&id).and_then(|lki| lki.power))
             })
+            .or_else(|| {
+                ability
+                    .and_then(|a| a.cost_paid_object.as_ref())
+                    .and_then(|snap| snap.lki.power)
+            })
             .unwrap_or(0),
-        // CR 603.7c: Toughness of the source object from the triggering event.
+        // CR 603.7c + CR 400.7j: Toughness of the source object. See
+        // `EventContextSourcePower` above for the trigger → cost-paid-object
+        // fallback rationale.
         QuantityRef::EventContextSourceToughness => state
             .current_trigger_event
             .as_ref()
@@ -1108,8 +1122,15 @@ fn resolve_ref(
                     .and_then(|obj| obj.toughness)
                     .or_else(|| state.lki_cache.get(&id).and_then(|lki| lki.toughness))
             })
+            .or_else(|| {
+                ability
+                    .and_then(|a| a.cost_paid_object.as_ref())
+                    .and_then(|snap| snap.lki.toughness)
+            })
             .unwrap_or(0),
-        // CR 603.7c: Mana value of the source object from the triggering event.
+        // CR 603.7c + CR 400.7j: Mana value of the source object. See
+        // `EventContextSourcePower` above for the trigger → cost-paid-object
+        // fallback rationale.
         QuantityRef::EventContextSourceManaValue => state
             .current_trigger_event
             .as_ref()
@@ -1125,6 +1146,11 @@ fn resolve_ref(
                             .get(&id)
                             .map(|lki| u32_to_i32_saturating(lki.mana_value))
                     })
+            })
+            .or_else(|| {
+                ability
+                    .and_then(|a| a.cost_paid_object.as_ref())
+                    .map(|snap| u32_to_i32_saturating(snap.lki.mana_value))
             })
             .unwrap_or(0),
         // CR 107.3a + CR 601.2b + CR 603.7c: The announced value of X for the
@@ -5399,6 +5425,189 @@ mod tests {
         assert_eq!(
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)),
             6
+        );
+    }
+
+    /// CR 400.7j + CR 117.1 + CR 608.2k: Regression guard for Greater Good
+    /// (issue #334). When an activated ability with a sacrifice cost
+    /// references "the sacrificed creature's power", the parser emits
+    /// `EventContextSourcePower`. No trigger event is in scope for activated
+    /// abilities, so the resolver must fall back to the resolving ability's
+    /// `cost_paid_object` snapshot captured at cost-payment time.
+    #[test]
+    fn resolve_event_context_source_power_cost_paid_object_fallback() {
+        use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
+        use crate::types::game_state::LKISnapshot;
+
+        let state = GameState::new_two_player(42);
+        // No current_trigger_event — this is an activated ability resolution.
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextSourcePower,
+                },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+            object_id: ObjectId(99),
+            lki: LKISnapshot {
+                name: "Regal Force".to_string(),
+                power: Some(5),
+                toughness: Some(5),
+                mana_value: 6,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![ManaColor::Green],
+                counters: HashMap::new(),
+            },
+        });
+        let power = resolve_quantity_with_targets(
+            &state,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourcePower,
+            },
+            &ability,
+        );
+        assert_eq!(
+            power, 5,
+            "EventContextSourcePower must fall back to cost-paid object's LKI power \
+             when no trigger event is in scope (Greater Good: sacrificed 5/5 → draw 5)"
+        );
+
+        let toughness = resolve_quantity_with_targets(
+            &state,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceToughness,
+            },
+            &ability,
+        );
+        assert_eq!(toughness, 5);
+        let cmc = resolve_quantity_with_targets(
+            &state,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceManaValue,
+            },
+            &ability,
+        );
+        assert_eq!(cmc, 6);
+    }
+
+    /// Regression guard: when neither a trigger event nor a cost-paid-object
+    /// snapshot is in scope, `EventContextSourcePower` must still return 0
+    /// rather than panic or hit an unexpected fallback (e.g. the source
+    /// object's own power).
+    #[test]
+    fn resolve_event_context_source_power_no_context_returns_zero() {
+        use crate::types::ability::ResolvedAbility;
+
+        let mut state = GameState::new_two_player(42);
+        // Source has a real power, to prove we DON'T read it.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Greater Good".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().power = Some(7);
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextSourcePower,
+                },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        let resolved = resolve_quantity_with_targets(
+            &state,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourcePower,
+            },
+            &ability,
+        );
+        assert_eq!(
+            resolved, 0,
+            "EventContextSourcePower with no trigger event and no cost-paid \
+             snapshot must return 0 (not the source object's own power)"
+        );
+    }
+
+    /// CR 603.7c precedence: when both a trigger event and a cost-paid-object
+    /// snapshot are in scope (theoretical — triggered abilities don't carry
+    /// activation costs in practice), the trigger event wins. Guards the
+    /// fallback ordering contract.
+    #[test]
+    fn resolve_event_context_source_power_trigger_event_takes_priority() {
+        use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
+        use crate::types::game_state::LKISnapshot;
+
+        let mut state = GameState::new_two_player(42);
+        let trigger_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Triggering Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&trigger_source).unwrap().power = Some(3);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: trigger_source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        });
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextSourcePower,
+                },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        // Cost-paid snapshot with a DIFFERENT power, so we can detect which path won.
+        ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+            object_id: ObjectId(99),
+            lki: LKISnapshot {
+                name: "Sacrificed Hulk".to_string(),
+                power: Some(99),
+                toughness: Some(99),
+                mana_value: 99,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                counters: HashMap::new(),
+            },
+        });
+        let resolved = resolve_quantity_with_targets(
+            &state,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourcePower,
+            },
+            &ability,
+        );
+        assert_eq!(
+            resolved, 3,
+            "Trigger event must take priority over cost-paid-object fallback"
         );
     }
 
