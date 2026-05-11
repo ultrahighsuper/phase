@@ -1564,9 +1564,7 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     obj.keywords.push(resolved_keyword.clone());
                 }
                 for trigger in KeywordTriggerInstaller::triggers_for(&resolved_keyword) {
-                    if !obj.trigger_definitions.iter_all().any(|t| t == &trigger) {
-                        obj.trigger_definitions.push(trigger);
-                    }
+                    obj.trigger_definitions.push(trigger);
                 }
             }
             // Asymmetric on purpose: `RemoveKeyword` strips every keyword that
@@ -5948,6 +5946,59 @@ mod tests {
             .type_filters
             .iter()
             .any(|filter| matches!(filter, TypeFilter::Permanent)));
+    }
+
+    #[test]
+    fn add_keyword_annihilator_preserves_printed_and_granted_instances() {
+        let mut state = setup();
+        let attacker = make_creature(&mut state, "Printed Annihilator", 2, 2, PlayerId(0));
+        let source = make_creature(&mut state, "Battle-Mace", 1, 1, PlayerId(0));
+        let printed = Keyword::Annihilator(1);
+        let printed_trigger = KeywordTriggerInstaller::triggers_for(&printed)
+            .pop()
+            .expect("annihilator has a trigger template");
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.keywords.push(printed.clone());
+            obj.base_keywords.push(printed.clone());
+            obj.trigger_definitions.push(printed_trigger.clone());
+            Arc::make_mut(&mut obj.base_trigger_definitions).push(printed_trigger);
+        }
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: attacker })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: printed,
+            }]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&attacker).unwrap();
+        let annihilator_triggers = obj
+            .trigger_definitions
+            .iter_all()
+            .filter(|trigger| matches!(trigger.mode, TriggerMode::Attacks))
+            .filter(|trigger| matches!(trigger.valid_card, Some(TargetFilter::SelfRef)))
+            .filter(|trigger| {
+                matches!(
+                    trigger.execute.as_deref().map(|ability| &*ability.effect),
+                    Some(Effect::Sacrifice {
+                        target: TargetFilter::Typed(filter),
+                        count: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    }) if filter.controller == Some(ControllerRef::DefendingPlayer)
+                )
+            })
+            .count();
+        assert_eq!(
+            annihilator_triggers, 2,
+            "printed Annihilator 1 and granted Annihilator 1 must remain independent trigger instances"
+        );
     }
 
     /// CR 702.16m: Multiple instances of protection from the same quality on
