@@ -6324,6 +6324,7 @@ fn is_blocked_by_per_turn_cast_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::CardDatabase;
     use crate::game::zones;
     use crate::game::zones::create_object;
     use crate::parser::oracle_static::parse_static_line;
@@ -6371,6 +6372,18 @@ mod tests {
                 expiry: None,
             });
         }
+    }
+
+    fn card_database_from_export() -> CardDatabase {
+        let paths = [
+            std::path::Path::new("client/public/card-data.json"),
+            std::path::Path::new("../../client/public/card-data.json"),
+        ];
+        let path = paths
+            .iter()
+            .find(|path| path.exists())
+            .expect("client/public/card-data.json must exist for real-card runtime tests");
+        CardDatabase::from_export(path).expect("card-data.json loads as a valid export")
     }
 
     fn foretell_test_cost() -> ManaCost {
@@ -13114,6 +13127,108 @@ mod tests {
             available.contains(&obj_id),
             "Flashback card in graveyard should be castable"
         );
+    }
+
+    #[test]
+    fn echo_of_eons_flashback_castable_with_nonempty_hand() {
+        let mut state = setup_game_at_main_phase();
+        let db = card_database_from_export();
+        let echo_face = db
+            .get_face_by_name("Echo of Eons")
+            .expect("Echo of Eons exists in card-data.json");
+        let echo_id = crate::game::deck_loading::create_object_from_card_face(
+            &mut state,
+            echo_face,
+            PlayerId(0),
+        );
+        let echo_card_id = state.objects.get(&echo_id).unwrap().card_id;
+        zones::move_to_zone(&mut state, echo_id, Zone::Graveyard, &mut Vec::new());
+
+        let hand_card = create_object(
+            &mut state,
+            CardId(9001),
+            PlayerId(0),
+            "Nonempty Hand Card".to_string(),
+            Zone::Hand,
+        );
+        for i in 0..10 {
+            create_object(
+                &mut state,
+                CardId(9100 + i),
+                PlayerId(0),
+                format!("P0 Library Card {i}"),
+                Zone::Library,
+            );
+            create_object(
+                &mut state,
+                CardId(9200 + i),
+                PlayerId(1),
+                format!("P1 Library Card {i}"),
+                Zone::Library,
+            );
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 3);
+
+        assert!(
+            spell_objects_available_to_cast(&state, PlayerId(0)).contains(&echo_id),
+            "Echo of Eons with flashback should be available from graveyard"
+        );
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), echo_id),
+            "nonempty hand must not be treated as a cast-time target/choice blocker"
+        );
+        assert!(
+            crate::ai_support::legal_actions(&state)
+                .iter()
+                .any(|action| {
+                    matches!(
+                        action,
+                        GameAction::CastSpell { object_id, .. } if *object_id == echo_id
+                    )
+                }),
+            "legal action generation should expose the flashback cast"
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: echo_id,
+                card_id: echo_card_id,
+                targets: vec![],
+            },
+        )
+        .expect("Echo of Eons should cast via flashback");
+        assert_eq!(state.stack.len(), 1);
+
+        crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let resolution =
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("Echo of Eons should resolve");
+
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects.get(&echo_id).unwrap().zone, Zone::Exile);
+        assert!(
+            resolution.events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Hand),
+                        to: Zone::Library,
+                        ..
+                    } if *object_id == hand_card
+                )
+            }),
+            "the nonempty hand card should be shuffled into the library during resolution"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            } | WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        ));
     }
 
     #[test]
