@@ -5033,6 +5033,13 @@ fn ability_places_counter(def: &AbilityDefinition, counter_type: &CounterType) -
         | Effect::PutCounterAll {
             counter_type: ct, ..
         } => ct == counter_type,
+        Effect::MoveCounters {
+            counter_type: Some(ct),
+            ..
+        } => ct == counter_type,
+        Effect::MoveCounters {
+            counter_type: None, ..
+        } => true,
         Effect::Token {
             enter_with_counters,
             ..
@@ -7599,7 +7606,10 @@ mod tests {
 
     use super::*;
     use crate::database::legality::{legalities_to_export_map, LegalityStatus};
-    use crate::types::ability::{AbilityKind, Effect, ReplacementCondition, TargetFilter};
+    use crate::types::ability::{
+        AbilityKind, CounterTransferMode, Effect, PreventionAmount, PreventionScope,
+        ReplacementCondition, TargetFilter,
+    };
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -8393,6 +8403,101 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, SemanticFinding::DroppedDuration { duration_text, .. } if duration_text == "until end of turn")),
             "Should detect dropped duration: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_split_line_accepts_duration_and_pump_on_matching_clause() {
+        let mut face = make_face();
+        let oracle = "Target blocking Wall you control gets +10/+0 until end of combat. Prevent all damage that would be dealt to it this turn. Destroy it at the beginning of the next end step.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Pump {
+                    power: PtValue::Fixed(10),
+                    toughness: PtValue::Fixed(0),
+                    target: TargetFilter::Any,
+                },
+            )
+            .duration(Duration::UntilEndOfCombat)
+            .description(
+                "Target blocking Wall you control gets +10/+0 until end of combat.".to_string(),
+            ),
+        );
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PreventDamage {
+                    amount: PreventionAmount::All,
+                    target: TargetFilter::Any,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: None,
+                },
+            )
+            .duration(Duration::UntilEndOfTurn)
+            .description("Prevent all damage that would be dealt to it this turn.".to_string()),
+        );
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Any,
+                    cant_regenerate: false,
+                },
+            )
+            .description("Destroy it at the beginning of the next end step.".to_string()),
+        );
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings.iter().any(|f| {
+                matches!(f, SemanticFinding::DroppedDuration { .. })
+                    || matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "pump")
+            }),
+            "Split line should accept duration/pump on the matching clause: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_split_line_accepts_move_counters() {
+        let mut face = make_face();
+        let oracle = "Move a +1/+1 counter from this creature onto target creature. Draw a card.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::MoveCounters {
+                    source: TargetFilter::SelfRef,
+                    counter_type: Some(CounterType::Plus1Plus1),
+                    count: Some(QuantityExpr::Fixed { value: 1 }),
+                    mode: CounterTransferMode::Move,
+                    target: TargetFilter::Any,
+                },
+            )
+            .description(
+                "Move a +1/+1 counter from this creature onto target creature.".to_string(),
+            ),
+        );
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .description("Draw a card.".to_string()),
+        );
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings.iter().any(
+                |f| matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "counter")
+            ),
+            "Split line should accept MoveCounters as counter coverage: {findings:?}"
         );
     }
 
