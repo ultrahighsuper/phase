@@ -15,7 +15,7 @@ import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { DungeonChoiceModal, RoomChoiceModal } from "./DungeonChoiceModal.tsx";
 import { DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
 import { DistributeAmongModal } from "./DistributeAmongModal.tsx";
-import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
+import { CopyRetargetModal, RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
 import { ProliferateModal } from "./ProliferateModal.tsx";
 
 type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
@@ -289,6 +289,9 @@ export function CardChoiceModal() {
     case "RetargetChoice":
       if (!canActForWaitingState) return null;
       return <RetargetChoiceModal data={waitingFor.data} />;
+    case "CopyRetarget":
+      if (!canActForWaitingState) return null;
+      return <CopyRetargetModal data={waitingFor.data} />;
     case "ProliferateChoice":
       if (!canActForWaitingState) return null;
       return <ProliferateModal data={waitingFor.data} />;
