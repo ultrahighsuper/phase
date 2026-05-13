@@ -14,6 +14,7 @@ use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleResult;
+use super::oracle_nom::filter::parse_enters_origin_zone;
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
@@ -3177,10 +3178,33 @@ fn try_parse_event(
         def.destination = Some(Zone::Battlefield);
         def.valid_card = Some(subject.clone());
 
-        // CR 702.49c: "enters from your hand" — set origin zone.
-        let rest_lower = rest.to_lowercase();
-        if scan_contains(&rest_lower, "from your hand") {
-            def.origin = Some(Zone::Hand);
+        // CR 603.6 + CR 603.6a: "enters from <zone>" — origin-zone qualifier on
+        // an ETB trigger restricts which zone-change events match. Without
+        // this, a battlefield permanent with "whenever a creature enters from
+        // your graveyard" would fire on every creature entering from anywhere
+        // (cast from hand, returned from exile, commander from command zone),
+        // because the runtime trigger matcher treats `origin: None` as
+        // "any origin zone." Issue #396 (Flayer of the Hatebound firing on
+        // commanders cast from the command zone) is exactly this drop.
+        //
+        // The origin qualifier may appear immediately after the verb
+        // ("enters from your graveyard, …") or after the battlefield phrase
+        // ("enters the battlefield from a graveyard"). Scan the condition
+        // segment at word boundaries with the typed combinator so the order
+        // of the qualifier does not matter. (The effect segment is already
+        // separated upstream by `split_trigger`, so a tail clause like
+        // "return that card from your graveyard" cannot poison this scan.)
+        //
+        // TODO: extend `parse_enters_origin_zone` to handle "from anywhere",
+        // "from anywhere other than <zone>", and opponent-scoped origins as
+        // those patterns surface in real cards.
+        let mut scan = after_enter.trim_start();
+        while !scan.is_empty() {
+            if let Ok((_, origin)) = parse_enters_origin_zone(scan) {
+                def.origin = Some(origin);
+                break;
+            }
+            scan = scan.find(' ').map_or("", |i| scan[i + 1..].trim_start());
         }
 
         // CR 603.6a + CR 611.2b: "enters untapped" / "enters tapped" — conditional
@@ -11450,6 +11474,35 @@ mod tests {
         assert!(def.execute.is_some());
         let exec = def.execute.as_ref().unwrap();
         assert!(matches!(*exec.effect, Effect::CopyTokenOf { .. }));
+    }
+
+    /// CR 603.6 + CR 603.6a — Flayer of the Hatebound: "enters from your
+    /// graveyard" must set `origin = Some(Graveyard)` on the ChangesZone
+    /// trigger. Issue #396 — previously the origin-zone qualifier was
+    /// dropped, so the trigger fired on any creature entering from any zone
+    /// (including commanders cast from the command zone).
+    #[test]
+    fn trigger_etb_from_graveyard_flayer() {
+        let def = parse_trigger_line(
+            "Whenever this creature or another creature enters from your graveyard, that creature deals damage equal to its power to any target.",
+            "Flayer of the Hatebound",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(def.origin, Some(Zone::Graveyard));
+    }
+
+    /// CR 603.6 + CR 603.6a — origin extraction for "enters from exile"
+    /// triggers (e.g. cards that fire when a creature comes back from exile).
+    #[test]
+    fn trigger_etb_from_exile_origin() {
+        let def = parse_trigger_line(
+            "Whenever another creature enters from exile, draw a card.",
+            "Test Source",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(def.origin, Some(Zone::Exile));
     }
 
     /// CR 508.4 + CR 614.1 — Kaalia of the Vast: the inline-tail patcher in
