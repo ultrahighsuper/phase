@@ -2,8 +2,16 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import type { RawDiscordMessage, ReportItem, SyncState, TriageItem } from "./lib/types.ts";
+import type {
+  PublishedThread,
+  RawDiscordMessage,
+  ReportItem,
+  SyncState,
+  TriageItem,
+} from "./lib/types.ts";
 import {
+  addReaction,
+  createMessage,
   discordGet,
   fetchActiveThreads,
   fetchArchivedThreads,
@@ -57,6 +65,7 @@ function defaultSyncState(): SyncState {
     last_fetch_at: new Date(0).toISOString(),
     last_thread_cursors: {},
     imported_from_legacy: false,
+    published_threads: {},
   };
 }
 
@@ -519,6 +528,467 @@ function applyGithubDedupe(
   return deduped;
 }
 
+// ---------------------------------------------------------------------------
+// Publish: create GitHub issues + write back to Discord (👀 + link reply)
+// ---------------------------------------------------------------------------
+
+const TRACKED_REPLY_PREFIX = "🔗 Tracked in";
+const REACTION_EMOJI = "👀";
+const ISSUE_REPO = "phase-rs/phase";
+
+// NOTE: this module deliberately does NOT pre-judge threads. The orchestrator
+// (an LLM in chat) reads candidate threads, cross-references existing GH issues,
+// and decides per thread whether to file, dedupe, skip-resolved, etc. This
+// script's job is mechanics: list candidates, expose raw messages, create
+// issues on instruction, react/reply on instruction, persist state.
+
+
+// Mechanics-only: pick the primary_report for a thread, or fall back to the
+// first item. The orchestrator (LLM) has already decided to publish this
+// thread by listing it in --thread; this function only chooses WHICH item's
+// summary/cards to use for the issue body. It does not gate.
+function pickPublishItem(items: TriageItem[]): TriageItem | null {
+  if (items.length === 0) return null;
+  return items.find((it) => it.classification === "primary_report") ?? items[0];
+}
+
+function buildIssueTitle(item: TriageItem): string {
+  // Thread title is consistently more readable than the cards array, which
+  // routinely contains false-positive single-word matches ("life", "x", "give")
+  // alongside real card names. Use the thread title as the canonical prefix;
+  // the cards array stays in the body for search/grep visibility.
+  const prefix = item.thread_name.trim() || "Bug report";
+  const summary = item.summary.replace(/\s+/g, " ").trim();
+  const max = 120;
+  const raw = summary === "" ? prefix : `${prefix} — ${summary}`;
+  return raw.length <= max ? raw : `${raw.slice(0, max - 1).trimEnd()}…`;
+}
+
+function buildIssueBody(item: TriageItem): string {
+  // The Discord source URL anchor is REQUIRED — applyGithubDedupe matches on it
+  // so subsequent triage runs recognize this issue and do not re-create it.
+  const lines = [
+    `Reported in Discord: ${item.source_url}`,
+    ``,
+    `**Thread:** ${item.thread_name}`,
+    `**Cards:** ${item.cards.length > 0 ? item.cards.join(", ") : "_none detected_"}`,
+    `**Parser status:** ${item.parser_status}`,
+    `**Extraction confidence:** ${item.extraction_confidence.toFixed(2)}`,
+    ``,
+    `## Summary`,
+    item.summary || "_(no summary extracted — see Discord thread)_",
+    ``,
+    `---`,
+    `<sub>report_id: \`${item.report_id}\` · discord: \`${item.thread_id}/${item.message_id}\`</sub>`,
+  ];
+  return lines.join("\n");
+}
+
+interface CreatedIssue {
+  number: number;
+  url: string;
+}
+
+function createGithubIssue(item: TriageItem): CreatedIssue {
+  const title = buildIssueTitle(item);
+  const body = buildIssueBody(item);
+  const labels = ["source:discord", "status:needs-triage"];
+
+  const result = Bun.spawnSync([
+    "gh",
+    "issue",
+    "create",
+    "--repo",
+    ISSUE_REPO,
+    "--title",
+    title,
+    "--body",
+    body,
+    "--label",
+    labels.join(","),
+  ]);
+
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `gh issue create failed: ${result.stderr.toString() || result.stdout.toString()}`,
+    );
+  }
+
+  const url = result.stdout.toString().trim().split("\n").at(-1)?.trim() ?? "";
+  const match = url.match(/\/issues\/(\d+)$/);
+  if (match === null) {
+    throw new Error(`Could not parse issue number from gh output: ${url}`);
+  }
+  return { number: Number(match[1]), url };
+}
+
+// Phase 1 of publish: resolve the GitHub issue (create or link to existing).
+// Always succeeds-or-throws *before* any Discord side-effects, so the caller
+// can persist the GH record before risking the Discord call.
+function resolveIssue(
+  item: TriageItem,
+  mode: "created" | "reconciled",
+  dryRun: boolean,
+): { number: number; url: string } {
+  if (mode === "reconciled") {
+    const gh = item.github_issue;
+    if (gh === undefined) {
+      throw new Error(`reconcile mode requires github_issue on item ${item.report_id}`);
+    }
+    return { number: gh.number, url: gh.url };
+  }
+  if (dryRun) {
+    console.log(`    [dry-run] would: gh issue create --title "${buildIssueTitle(item)}"`);
+    return { number: 0, url: "https://github.com/phase-rs/phase/issues/DRY" };
+  }
+  const issue = createGithubIssue(item);
+  console.log(`    created issue #${issue.number}: ${issue.url}`);
+  return issue;
+}
+
+// Phase 2 of publish: react 👀 on the thread starter, post the tracking link.
+// Does NOT auto-unarchive: in this server, archive is the maintainer's manual
+// "resolved" signal. If we hit Discord error 50083 (Thread is archived) at
+// this point it means the operator archived the thread between the LLM's
+// judgment and the publish call — that's a strong "skip, leave it alone"
+// signal, and the caller logs it without touching the archive state.
+async function writeDiscordTracking(
+  item: TriageItem,
+  issueUrl: string,
+  dryRun: boolean,
+): Promise<string> {
+  const replyContent = `${TRACKED_REPLY_PREFIX} ${issueUrl}`;
+  if (dryRun) {
+    console.log(`    [dry-run] would: react ${REACTION_EMOJI} on ${item.thread_id}`);
+    console.log(`    [dry-run] would: post "${replyContent}" in ${item.thread_id}`);
+    return "DRY";
+  }
+  await addReaction(item.thread_id, item.thread_id, REACTION_EMOJI);
+  const posted = await createMessage(item.thread_id, replyContent);
+  return posted.id;
+}
+
+async function cmdMarkHandled(): Promise<void> {
+  // Two forms:
+  //  --until-thread=<id>          bootstrap: tag every thread <= the watermark
+  //  --thread=<id>[,<id>...]      tag specific threads (e.g. "dup of #406")
+  // Both store a sentinel record so `pending` never resurfaces the thread.
+  const argv = process.argv.slice(3);
+  const untilArg = argv.find((a: string) => a.startsWith("--until-thread="));
+  const threadArgs = argv
+    .filter((a: string) => a.startsWith("--thread="))
+    .flatMap((a: string) => a.slice("--thread=".length).split(",").map((s: string) => s.trim()))
+    .filter((s: string) => s !== "");
+  const notesArg = argv.find((a: string) => a.startsWith("--notes="));
+  const notes = notesArg !== undefined ? notesArg.slice("--notes=".length) : undefined;
+  const dryRun = argv.includes("--dry-run");
+
+  if (untilArg === undefined && threadArgs.length === 0) {
+    console.error(
+      "Usage:\n" +
+        "  mark-handled --thread=<id>[,<id>...] [--notes='dup of #406'] [--dry-run]\n" +
+        "  mark-handled --until-thread=<thread_id> [--dry-run]",
+    );
+    process.exit(1);
+  }
+
+  const rawMessages = readJsonl<RawDiscordMessage>(MESSAGES_PATH);
+  const lastByThread = new Map<string, string>();
+  for (const m of rawMessages) {
+    const prev = lastByThread.get(m.thread_id);
+    if (prev === undefined || m.timestamp > prev) lastByThread.set(m.thread_id, m.timestamp);
+  }
+
+  // Resolve the set of thread ids to mark.
+  const targets = new Set<string>();
+  if (untilArg !== undefined) {
+    const watermarkId = untilArg.slice("--until-thread=".length);
+    const watermarkTs = lastByThread.get(watermarkId);
+    if (watermarkTs === undefined) {
+      console.error(`Error: watermark thread ${watermarkId} not in local messages.`);
+      process.exit(1);
+    }
+    for (const [tid, ts] of lastByThread) {
+      if (ts <= watermarkTs) targets.add(tid);
+    }
+    console.log(`Watermark: ${watermarkId} (last activity ${watermarkTs})`);
+  }
+  for (const tid of threadArgs) {
+    if (!lastByThread.has(tid)) {
+      console.error(`Warning: thread ${tid} not in local messages — recording anyway.`);
+    }
+    targets.add(tid);
+  }
+
+  const state = await loadSyncState();
+  const published = { ...(state.published_threads ?? {}) };
+  const stamp = new Date().toISOString();
+
+  let added = 0;
+  let alreadyTracked = 0;
+  for (const threadId of targets) {
+    if (published[threadId] !== undefined) {
+      alreadyTracked++;
+      continue;
+    }
+    published[threadId] = {
+      issue_number: 0,
+      issue_url: "",
+      reacted_message_id: "",
+      reply_message_id: "",
+      published_at: stamp,
+      mode: "reconciled",
+      ...(notes !== undefined ? { notes } : {}),
+    };
+    added++;
+  }
+
+  console.log(`  targets:           ${targets.size}`);
+  console.log(`  newly recorded:    ${added}`);
+  console.log(`  already tracked:   ${alreadyTracked}`);
+
+  if (dryRun) {
+    console.log("  (dry-run — sync-state.json not modified)");
+    return;
+  }
+
+  state.published_threads = published;
+  await saveSyncState(state);
+  console.log(`  sync state:        ${SYNC_STATE_PATH}`);
+}
+
+async function cmdPending(): Promise<void> {
+  // Mechanics only: enumerate unpublished threads with optional --since
+  // watermark. NO verdict/staleness/dev-reply scanning — those judgments
+  // belong to the LLM driving this script.
+  const argv = process.argv.slice(3);
+  const limitArg = argv.find((a: string) => a.startsWith("--limit="));
+  const limit = limitArg !== undefined ? Number(limitArg.slice("--limit=".length)) : 50;
+  const sinceArg = argv.find((a: string) => a.startsWith("--since="));
+  const sinceThreadId = sinceArg !== undefined ? sinceArg.slice("--since=".length) : null;
+
+  const state = await loadSyncState();
+  const published = new Set(Object.keys(state.published_threads ?? {}));
+  const rawMessages = readJsonl<RawDiscordMessage>(MESSAGES_PATH);
+
+  let sinceTs: string | null = null;
+  if (sinceThreadId !== null) {
+    const watermark = rawMessages
+      .filter((m) => m.thread_id === sinceThreadId)
+      .map((m) => m.timestamp)
+      .sort()
+      .at(-1);
+    if (watermark === undefined) {
+      console.error(`Error: --since=${sinceThreadId} not found in local messages.`);
+      process.exit(1);
+    }
+    sinceTs = watermark;
+    console.log(`Watermark thread ${sinceThreadId} last activity: ${sinceTs}`);
+  }
+
+  interface Row {
+    thread_id: string;
+    thread_name: string;
+    last_ts: string;
+    message_count: number;
+  }
+  const byThread = new Map<string, Row>();
+  for (const m of rawMessages) {
+    const existing = byThread.get(m.thread_id);
+    if (existing === undefined) {
+      byThread.set(m.thread_id, {
+        thread_id: m.thread_id, thread_name: m.thread_name,
+        last_ts: m.timestamp, message_count: 1,
+      });
+    } else {
+      existing.message_count++;
+      if (m.timestamp > existing.last_ts) existing.last_ts = m.timestamp;
+    }
+  }
+
+  const rows = [...byThread.values()]
+    .filter((r) => !published.has(r.thread_id))
+    .filter((r) => sinceTs === null || r.last_ts > sinceTs)
+    .sort((a, b) => b.last_ts.localeCompare(a.last_ts));
+
+  console.log(`Pending threads (local-state diff vs published_threads)`);
+  console.log(`  total cursors:    ${Object.keys(state.last_thread_cursors ?? {}).length}`);
+  console.log(`  published:        ${published.size}`);
+  console.log(`  pending (shown):  ${Math.min(rows.length, limit)} of ${rows.length}`);
+  console.log("");
+
+  for (const r of rows.slice(0, limit)) {
+    console.log(
+      `  ${r.thread_id}  ${r.last_ts.slice(0, 10)}  msgs=${String(r.message_count).padStart(3)}  ${r.thread_name}`,
+    );
+  }
+
+  if (rows.length > 0) {
+    console.log("");
+    console.log("Read a thread inline:");
+    console.log(`  bun scripts/sync-bug-reports.ts read --thread=${rows[0].thread_id}`);
+  }
+}
+
+async function cmdReadThread(): Promise<void> {
+  // Dump the full message stream of a thread so the LLM can read and judge it.
+  // Output is plain text, oldest-first.
+  const argv = process.argv.slice(3);
+  const threadArg = argv.find((a: string) => a.startsWith("--thread="));
+  if (threadArg === undefined) {
+    console.error("Usage: read --thread=<thread_id>");
+    process.exit(1);
+  }
+  const threadId = threadArg.slice("--thread=".length);
+
+  const rawMessages = readJsonl<RawDiscordMessage>(MESSAGES_PATH);
+  const msgs = rawMessages
+    .filter((m) => m.thread_id === threadId)
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+  if (msgs.length === 0) {
+    console.error(`No messages found for thread ${threadId}.`);
+    process.exit(1);
+  }
+
+  console.log(`Thread: ${msgs[0].thread_name}  (${msgs.length} messages)`);
+  console.log(`Id:     ${threadId}`);
+  console.log("");
+  for (const m of msgs) {
+    const tag = m.author_is_bot ? "[bot] " : "";
+    console.log(`── ${m.timestamp.slice(0, 19)}  ${tag}${m.author_name}`);
+    if (m.content !== "") console.log(m.content);
+    if (m.attachments.length > 0) {
+      console.log(`   attachments: ${m.attachments.map((a) => a.filename).join(", ")}`);
+    }
+    console.log("");
+  }
+}
+
+async function cmdPublish(): Promise<void> {
+  // Mechanics only: the LLM driving this script has decided which threads to
+  // publish and lists them via --thread. No verdicts, no sweeping, no
+  // candidate scoring. The script's job: create the GH issue and write back to
+  // Discord. The only local-state gate is published_threads (so retries on
+  // partial failures don't double-file).
+  const argv = process.argv.slice(3);
+  const dryRun = argv.includes("--dry-run");
+
+  const targets = new Set<string>(
+    argv
+      .filter((a: string) => a.startsWith("--thread="))
+      .flatMap((a: string) => a.slice("--thread=".length).split(",").map((s: string) => s.trim()))
+      .filter((s: string) => s !== ""),
+  );
+
+  if (targets.size === 0) {
+    console.error(
+      "Usage: publish --thread=<id>[,<id>...] [--dry-run]\n" +
+        "publish takes an explicit list of thread ids decided by the operator.",
+    );
+    process.exit(1);
+  }
+
+  const items = readJsonl<TriageItem>(TRIAGE_ITEMS_PATH);
+  if (items.length === 0) {
+    console.error(`No triage items at ${TRIAGE_ITEMS_PATH}. Run 'triage' first.`);
+    process.exit(1);
+  }
+  if (Bun.env.DISCORD_BOT_TOKEN === undefined) {
+    console.error("Error: DISCORD_BOT_TOKEN must be set in .env");
+    process.exit(1);
+  }
+
+  const state = await loadSyncState();
+  const published = { ...(state.published_threads ?? {}) };
+
+  // Group triage items by thread so we can pick a representative for the issue body.
+  const itemsByThread = new Map<string, TriageItem[]>();
+  for (const item of items) {
+    if (!itemsByThread.has(item.thread_id)) itemsByThread.set(item.thread_id, []);
+    itemsByThread.get(item.thread_id)!.push(item);
+  }
+
+  let created = 0;
+  let skippedAlreadyPublished = 0;
+  let skippedNoItems = 0;
+  let failed = 0;
+
+  for (const threadId of targets) {
+    if (published[threadId] !== undefined) {
+      console.log(`  [skip] ${threadId} — already in published_threads (#${published[threadId].issue_number})`);
+      skippedAlreadyPublished++;
+      continue;
+    }
+
+    const threadItems = itemsByThread.get(threadId) ?? [];
+    const item = pickPublishItem(threadItems);
+    if (item === null) {
+      console.error(`  [skip] ${threadId} — no triage items for this thread`);
+      skippedNoItems++;
+      continue;
+    }
+
+    console.log(`  [publish] ${item.thread_name}`);
+
+    // Phase 1: GH issue first. If this throws we recorded no state — safe to retry.
+    let issue: { number: number; url: string };
+    try {
+      issue = resolveIssue(item, "created", dryRun);
+    } catch (err) {
+      console.error(`    failed (issue resolve): ${(err as Error).message}`);
+      failed++;
+      continue;
+    }
+
+    // Persist the GH side BEFORE attempting Discord — a Discord failure must
+    // never cause a duplicate GH issue on the next run. Discord success
+    // rewrites the record below with the actual reply message id.
+    if (!dryRun) {
+      published[threadId] = {
+        issue_number: issue.number,
+        issue_url: issue.url,
+        reacted_message_id: "",
+        reply_message_id: "",
+        published_at: new Date().toISOString(),
+        mode: "created",
+      };
+      state.published_threads = published;
+      await saveSyncState(state);
+    }
+
+    // Phase 2: Discord write-back. Failures (including 50083 archived-thread)
+    // leave the GH record intact and surface the error to the operator.
+    try {
+      const replyId = await writeDiscordTracking(item, issue.url, dryRun);
+      if (!dryRun) {
+        published[threadId] = {
+          ...published[threadId],
+          reacted_message_id: item.thread_id,
+          reply_message_id: replyId,
+        };
+        state.published_threads = published;
+        await saveSyncState(state);
+      }
+      created++;
+    } catch (err) {
+      console.error(`    failed (discord): ${(err as Error).message}`);
+      console.error(`    (GH issue #${issue.number} retained; write-back missed — operator must follow up)`);
+      failed++;
+    }
+  }
+
+  console.log(`Publish complete${dryRun ? " (dry-run)" : ""}.`);
+  console.log(`  Targets:                    ${targets.size}`);
+  console.log(`  Created:                    ${created}`);
+  console.log(`  Skipped (already published): ${skippedAlreadyPublished}`);
+  console.log(`  Skipped (no triage items):   ${skippedNoItems}`);
+  console.log(`  Failed:                     ${failed}`);
+  if (!dryRun) {
+    console.log(`  Sync state:                 ${SYNC_STATE_PATH}`);
+  }
+}
+
 async function cmdRender(): Promise<void> {
   const reports = readJsonl<ReportItem>(REPORT_ITEMS_PATH);
   if (reports.length === 0) {
@@ -677,6 +1147,24 @@ Commands:
   fetch     Fetch Discord messages → triage/raw/discord-messages.jsonl
   extract   Extract report items from messages → triage/report-items.jsonl
   triage    Classify report items → triage/triage-items.jsonl
+  pending   List unpublished threads (local-state diff of cursors vs
+            published_threads), newest-activity-first. NO judgment applied —
+            the operator (an LLM in chat) reads candidates and decides.
+            Flags: --limit=N (default 50), --since=<thread_id>
+  read      Dump the full message stream of a thread so the operator can read
+            and judge it inline.
+            Flags: --thread=<thread_id>
+  mark-handled  Mark threads as already-handled without filing a GH issue.
+            Two forms: (a) --until-thread=<id> bootstraps every thread <= the
+            watermark, (b) --thread=<id>[,<id>...] marks specific threads
+            (e.g. "this is a dup of #N", "already resolved").
+            Flags: --until-thread=<id>, --thread=<id>[,<id>], --dry-run
+  publish   Create a GH issue for each --thread=<id> the operator listed, then
+            react 👀 + post tracking link in the Discord thread. Mechanics only
+            — the operator has already decided these threads are worth filing.
+            Flags:
+              --dry-run                 preview without side effects
+              --thread=<id>[,<id>...]   thread ids to publish (required)
   crossref  Cross-reference LLM triage against parser coverage → triage/coverage-crossref.jsonl
   verify    Check open GitHub issues against current coverage for newly-fixed bugs
   render    Generate dashboard markdown → triage/dashboard.md (+ triage-dashboard.md if triaged)
@@ -699,6 +1187,18 @@ switch (command) {
     break;
   case "triage":
     await cmdTriage();
+    break;
+  case "publish":
+    await cmdPublish();
+    break;
+  case "pending":
+    await cmdPending();
+    break;
+  case "mark-handled":
+    await cmdMarkHandled();
+    break;
+  case "read":
+    await cmdReadThread();
     break;
   case "crossref":
     await cmdCrossref();
