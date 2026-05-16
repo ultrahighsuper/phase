@@ -683,14 +683,29 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
 
-        // Category choice: choose None for each category.
+        // CR 101.4 + CR 701.21a: Category choice — pick one distinct permanent
+        // per type category, the rest are sacrificed. A permanent that belongs
+        // to multiple categories (e.g. an artifact creature) is eligible in
+        // each, but the engine rejects choosing the same object for more than
+        // one category (`engine_resolution_choices.rs` SelectCategoryPermanents
+        // duplicate guard). Greedily pick the first not-yet-used eligible
+        // object per category, mirroring the `used`-vec algorithm in
+        // `choose_and_sacrifice_rest::try_auto_resolve` so the two stay
+        // consistent. `None` for empty/exhausted categories is a legal choice.
         WaitingFor::CategoryChoice {
             eligible_per_category,
             ..
         } => {
+            let mut used: Vec<engine::types::identifiers::ObjectId> = Vec::new();
             let choices = eligible_per_category
                 .iter()
-                .map(|eligible| eligible.first().copied())
+                .map(|eligible| {
+                    let pick = eligible.iter().copied().find(|id| !used.contains(id));
+                    if let Some(id) = pick {
+                        used.push(id);
+                    }
+                    pick
+                })
                 .collect();
             Some(GameAction::SelectCategoryPermanents { choices })
         }
@@ -2387,5 +2402,73 @@ mod tests {
              evaluate_after_action before relaxing this bound.",
             elapsed
         );
+    }
+
+    /// Regression for #447: when a permanent belongs to multiple type
+    /// categories (an artifact creature), the `CategoryChoice` fallback must
+    /// pick *distinct* objects per category. Picking the same object twice is
+    /// rejected by the engine (`engine_resolution_choices.rs`
+    /// SelectCategoryPermanents duplicate guard), which would softlock the AI
+    /// seat. The greedy `used`-vec algorithm mirrors
+    /// `choose_and_sacrifice_rest::try_auto_resolve`.
+    #[test]
+    fn category_choice_fallback_picks_distinct_objects_and_applies() {
+        let mut state = make_state();
+        // Source of the ChooseAndSacrificeRest ability.
+        let source_card = CardId(state.next_object_id);
+        let source = create_object(
+            &mut state,
+            source_card,
+            PlayerId(0),
+            "Cataclysmic Gearhulk".to_string(),
+            Zone::Battlefield,
+        );
+        // An artifact creature controlled by player 0 — eligible in both the
+        // Artifact and Creature categories.
+        let ac_card = CardId(state.next_object_id);
+        let artifact_creature = create_object(
+            &mut state,
+            ac_card,
+            PlayerId(0),
+            "Steel Hellkite".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&artifact_creature).unwrap();
+            obj.card_types.core_types = vec![CoreType::Artifact, CoreType::Creature];
+        }
+
+        // `[[X],[X]]` — X shared across both categories. The fallback must
+        // resolve this to distinct objects (X for the first, None for the
+        // second once X is used).
+        state.waiting_for = WaitingFor::CategoryChoice {
+            player: PlayerId(0),
+            target_player: PlayerId(0),
+            categories: vec![CoreType::Artifact, CoreType::Creature],
+            eligible_per_category: vec![vec![artifact_creature], vec![artifact_creature]],
+            source_id: source,
+            remaining_players: Vec::new(),
+            all_kept: Vec::new(),
+        };
+
+        let action = fallback_action(&state).expect("fallback returns an action");
+        let choices = match &action {
+            GameAction::SelectCategoryPermanents { choices } => choices.clone(),
+            other => panic!("expected SelectCategoryPermanents, got {other:?}"),
+        };
+
+        // No object may be repeated across categories.
+        let picked: Vec<ObjectId> = choices.iter().filter_map(|c| *c).collect();
+        for (i, id) in picked.iter().enumerate() {
+            assert!(
+                !picked[i + 1..].contains(id),
+                "fallback must not repeat an object across categories: {choices:?}"
+            );
+        }
+
+        // Driving the chosen action through the real engine must succeed —
+        // the duplicate guard would reject a repeated object.
+        engine::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect("engine must accept the distinct-object category choice");
     }
 }

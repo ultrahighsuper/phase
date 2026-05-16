@@ -17,6 +17,7 @@ import { DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
 import { DistributeAmongModal } from "./DistributeAmongModal.tsx";
 import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
 import { ProliferateModal } from "./ProliferateModal.tsx";
+import { CategoryChoiceModal } from "./CategoryChoiceModal.tsx";
 
 type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
@@ -285,6 +286,9 @@ export function CardChoiceModal() {
     case "ProliferateChoice":
       if (!canActForWaitingState) return null;
       return <ProliferateModal data={waitingFor.data} />;
+    case "CategoryChoice":
+      if (!canActForWaitingState) return null;
+      return <CategoryChoiceModal data={waitingFor.data} />;
     case "ManifestDreadChoice":
       if (!canActForWaitingState) return null;
       return <ManifestDreadModal data={waitingFor.data} />;
