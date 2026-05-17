@@ -823,6 +823,23 @@ pub(crate) fn handle_exile_for_cost(
         }
     }
 
+    // CR 608.2k: Capture the first exiled card's public characteristics BEFORE
+    // it leaves the zone, stamping it (recursively into the sub_ability) onto
+    // the resolving ability so `TargetFilter::CostPaidObject` ("the exiled
+    // card") resolves at ability resolution. Inert for pitch/escape callers —
+    // their effects never reference the cost-paid object.
+    let mut pending = pending;
+    if let Some(&first) = chosen.first() {
+        if let Some(obj) = state.objects.get(&first) {
+            pending
+                .ability
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                    object_id: first,
+                    lki: obj.snapshot_for_mana_spent(),
+                });
+        }
+    }
+
     for &id in chosen {
         super::zones::move_to_zone(state, id, Zone::Exile, events);
     }

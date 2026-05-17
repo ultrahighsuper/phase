@@ -5455,6 +5455,27 @@ fn find_non_self_discard(cost: &AbilityCost) -> Option<(&QuantityExpr, Option<&T
     }
 }
 
+/// CR 118.3 + CR 602.2b: Detect a non-self "exile a card from hand/graveyard"
+/// activation cost requiring interactive card selection (Jhoira of the Ghitu).
+/// Self-ref exile (Scavenge) returns `None` — that shape is auto-paid by
+/// `pay_ability_cost`'s graveyard arm and never back-referenced as a cost-paid
+/// object. Recurses into `Composite`.
+fn find_non_self_exile(cost: &AbilityCost) -> Option<(u32, Zone, Option<&TargetFilter>)> {
+    match cost {
+        AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            ..
+        } => None,
+        AbilityCost::Exile {
+            count,
+            zone: Some(z @ (Zone::Hand | Zone::Graveyard)),
+            filter,
+        } => Some((*count, *z, filter.as_ref())),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_exile),
+        _ => None,
+    }
+}
+
 fn find_tap_creatures_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
     match cost {
         AbilityCost::TapCreatures { count, filter } => Some((*count, filter)),
@@ -6044,6 +6065,35 @@ pub fn handle_activate_ability(
                 count,
                 cards: eligible,
                 pending_cast: Box::new(pending_discard),
+            });
+        }
+
+        // CR 118.3 + CR 602.2b: Pre-check for non-self exile-from-hand/graveyard
+        // costs — detour to `WaitingFor::ExileForCost` before any cost payment,
+        // mirroring the Sacrifice/Discard detours above. The full `Composite`
+        // cost (including the `Mana` sub-cost) stays in `activation_cost`; the
+        // mana is paid by `push_activated_ability_to_stack` after the card
+        // selection completes (CR 601.2h: remaining costs paid in any order).
+        if let Some((count, zone, filter)) = find_non_self_exile(cost) {
+            let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
+                .expect("find_non_self_exile restricts zone to Hand or Graveyard");
+            let eligible =
+                find_eligible_exile_for_cost_targets(state, player, source_id, narrow_zone, filter);
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible cards to exile".into(),
+                ));
+            }
+            let mut pending_exile =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_exile.activation_cost = Some(cost.clone());
+            pending_exile.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::ExileForCost {
+                player,
+                zone: narrow_zone,
+                count: count as usize,
+                cards: eligible,
+                pending_cast: Box::new(pending_exile),
             });
         }
 
@@ -8600,6 +8650,202 @@ mod tests {
             state.stack[0].kind,
             StackEntryKind::ActivatedAbility { source_id, .. } if source_id == blood
         ));
+    }
+
+    /// Issue #462: Jhoira of the Ghitu — "{2}, Exile a nonland card from your
+    /// hand: Put four time counters on the exiled card. If it doesn't have
+    /// suspend, it gains suspend." Drives the real activation pipeline:
+    /// ActivateAbility → WaitingFor::ExileForCost → SelectCards → resolution.
+    /// Asserts CR 608.2k (the exiled card is the cost-paid object), CR 122.1
+    /// (counters land on an exile-zone card), CR 702.62b (suspended).
+    #[test]
+    fn jhoira_exile_cost_activation_suspends_the_exiled_card() {
+        use super::super::engine::apply_as_current;
+        use crate::types::counter::CounterType;
+
+        let mut state = setup_game_at_main_phase();
+        let jhoira = create_object(
+            &mut state,
+            CardId(980),
+            PlayerId(0),
+            "Jhoira of the Ghitu".to_string(),
+            Zone::Battlefield,
+        );
+        // A nonland card in hand — the eligible exile-cost target.
+        let nonland = create_object(
+            &mut state,
+            CardId(981),
+            PlayerId(0),
+            "Eligible Sorcery".to_string(),
+            Zone::Hand,
+        );
+        // A land in hand — must NOT be offered (cost filter is Non:Land).
+        let land = create_object(
+            &mut state,
+            CardId(982),
+            PlayerId(0),
+            "Ineligible Land".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&jhoira).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                "{2}, Exile a nonland card from your hand: Put four time \
+                 counters on the exiled card. If it doesn't have suspend, it \
+                 gains suspend.",
+                "Jhoira of the Ghitu",
+                &[],
+                &[String::from("Creature")],
+                &[],
+            );
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+        }
+        {
+            let nl = state.objects.get_mut(&nonland).unwrap();
+            nl.card_types.core_types.push(CoreType::Sorcery);
+            nl.base_card_types = nl.card_types.clone();
+        }
+        {
+            let l = state.objects.get_mut(&land).unwrap();
+            l.card_types.core_types.push(CoreType::Land);
+            l.base_card_types = l.card_types.clone();
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        // Activate the exile-cost ability.
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: jhoira,
+                ability_index: 0,
+            },
+        )
+        .expect("Jhoira's exile-cost ability must enter the activation pipeline");
+
+        // CR 118.3 + CR 602.2b: the activation detours to ExileForCost, and
+        // only the nonland card is an eligible choice.
+        match &state.waiting_for {
+            WaitingFor::ExileForCost {
+                zone: ExileCostSourceZone::Hand,
+                count,
+                cards,
+                ..
+            } => {
+                assert_eq!(*count, 1, "Jhoira exiles exactly one card");
+                assert!(cards.contains(&nonland), "the nonland card is eligible");
+                assert!(
+                    !cards.contains(&land),
+                    "the land must be excluded by the Non:Land cost filter"
+                );
+            }
+            other => panic!("expected WaitingFor::ExileForCost, got {other:?}"),
+        }
+        assert_eq!(
+            state.objects[&nonland].zone,
+            Zone::Hand,
+            "the card must still be in hand before the selection completes"
+        );
+
+        // Pay the exile cost by selecting the nonland card.
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![nonland],
+            },
+        )
+        .expect("paying the exile-from-hand cost must succeed");
+
+        // CR 601.2h: the {2} mana sub-cost is paid after the card selection.
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "the {{2}} mana sub-cost must be deducted from the pool"
+        );
+        // The card left hand for exile.
+        assert_eq!(
+            state.objects[&nonland].zone,
+            Zone::Exile,
+            "the exile-cost card must be in the exile zone"
+        );
+        assert_eq!(state.stack.len(), 1, "the ability is on the stack");
+
+        // Resolve the ability.
+        let mut events = Vec::new();
+        stack::resolve_top(&mut state, &mut events);
+
+        // CR 122.1 + CR 608.2k: four time counters land on the exiled card.
+        assert_eq!(
+            state.objects[&nonland]
+                .counters
+                .get(&CounterType::Time)
+                .copied(),
+            Some(4),
+            "the exiled card must carry four time counters"
+        );
+        // CR 702.62b: the exiled card now has suspend (the sub-ability grant).
+        assert!(
+            crate::game::keywords::object_has_effective_keyword_kind(
+                &state,
+                nonland,
+                crate::types::keywords::KeywordKind::Suspend,
+            ),
+            "the exiled card must have suspend granted by Jhoira's sub-ability"
+        );
+    }
+
+    /// Building-block test for `TargetFilter::CostPaidObject` as an effect
+    /// target: a `PutCounter` whose target is `CostPaidObject` resolves the
+    /// counters onto `ability.cost_paid_object`, independent of any card.
+    #[test]
+    fn cost_paid_object_resolves_as_put_counter_effect_target() {
+        use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
+        use crate::types::counter::CounterType;
+
+        let mut state = setup_game_at_main_phase();
+        let recipient = create_object(
+            &mut state,
+            CardId(990),
+            PlayerId(0),
+            "Counter Recipient".to_string(),
+            Zone::Exile,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(991),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let snapshot = state.objects[&recipient].snapshot_for_mana_spent();
+        let mut ability = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Time,
+                count: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::CostPaidObject,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        ability.cost_paid_object = Some(CostPaidObjectSnapshot {
+            object_id: recipient,
+            lki: snapshot,
+        });
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("PutCounter with CostPaidObject target must resolve");
+
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Time)
+                .copied(),
+            Some(4),
+            "CostPaidObject effect target must resolve onto the stamped object"
+        );
     }
 
     /// Composite costs with Sacrifice + Pay {X}{G}: the fixed G contributes to

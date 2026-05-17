@@ -370,6 +370,18 @@ pub fn resolved_targets(
             })
             .unwrap_or_default();
     }
+    // CR 608.2k: "the exiled/sacrificed/discarded <noun>" — an untargeted
+    // reference to the object referred to by this ability's cost. Resolved
+    // from the recursively-stamped `cost_paid_object`. Mirrors the local
+    // resolution `token_copy.rs` already performs for `CopyTokenOf`; this is
+    // the general chokepoint for every effect that targets a cost-paid object.
+    if matches!(target_filter, TargetFilter::CostPaidObject) {
+        return ability
+            .cost_paid_object
+            .iter()
+            .map(|snap| TargetRef::Object(snap.object_id))
+            .collect();
+    }
     let use_self = matches!(
         target_filter,
         TargetFilter::None | TargetFilter::ParentTarget

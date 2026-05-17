@@ -390,7 +390,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     }
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
         alt((
-            parse_cost_paid_object_reference,
+            |i| parse_cost_paid_object_reference(i, ctx),
             value(
                 TargetFilter::TriggeringSource,
                 (
@@ -3223,7 +3223,11 @@ fn parse_shared_quality(input: &str) -> nom::IResult<&str, SharedQuality, Oracle
 fn parse_shared_quality_reference(
     input: &str,
 ) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
-    if let Ok((rest, filter)) = parse_cost_paid_object_reference(input) {
+    // Shared-quality clauses ("creatures that share a type with the sacrificed
+    // creature") only ever back-reference a *sacrificed* cost object; the
+    // context-gated "exiled" participle is irrelevant here, so a default
+    // `ParseContext` (no exile cost) is correct — "exiled" stays a fall-through.
+    if let Ok((rest, filter)) = parse_cost_paid_object_reference(input, &ParseContext::default()) {
         return Ok((rest, filter));
     }
 
@@ -3256,11 +3260,25 @@ fn parse_shared_quality_reference(
     }
 }
 
-fn parse_cost_paid_object_reference(
-    input: &str,
-) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
+/// CR 608.2k: "the sacrificed/exiled <noun>" — an untargeted reference to the
+/// object referred to by this ability's cost. "sacrificed" is always a cost
+/// participle. "exiled" is a cost participle ONLY when the enclosing ability
+/// carries a non-self exile cost (`ctx.current_ability_exile_cost_zone`);
+/// otherwise it is an effect participle and the combinator returns
+/// `nom::Err::Error`, so dispatch falls through to the `TRACKED_SET_PHRASES`
+/// table, which keeps "the exiled card" → `TrackedSet` for the common
+/// effect-exile case.
+fn parse_cost_paid_object_reference<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> nom::IResult<&'a str, TargetFilter, OracleError<'a>> {
     let (rest, _) = opt(tag("the ")).parse(input)?;
-    let (rest, _) = tag("sacrificed ").parse(rest)?;
+    let exile_is_cost = ctx.current_ability_exile_cost_zone.is_some();
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("sacrificed "),
+        nom::combinator::verify(tag("exiled "), |_: &str| exile_is_cost),
+    ))
+    .parse(rest)?;
     let (rest, _) = alt((
         tag("creature"),
         tag("card"),
@@ -5759,6 +5777,31 @@ mod tests {
     #[test]
     fn the_exiled_permanents_produces_tracked_set() {
         let (f, _) = parse_target("the exiled permanents");
+        assert_eq!(
+            f,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+    }
+
+    #[test]
+    fn the_exiled_card_with_exile_cost_context_produces_cost_paid_object() {
+        // CR 608.2k: with an active exile cost, "the exiled card" is the
+        // cost-paid object (Jhoira of the Ghitu), not an effect tracked set.
+        let mut ctx = ParseContext {
+            current_ability_exile_cost_zone: Some(Zone::Hand),
+            ..ParseContext::default()
+        };
+        let (f, _) = parse_target_with_ctx("the exiled card", &mut ctx);
+        assert_eq!(f, TargetFilter::CostPaidObject);
+    }
+
+    #[test]
+    fn the_exiled_card_without_exile_cost_stays_tracked_set() {
+        // No exile cost → "exiled" is an effect participle → TrackedSet.
+        let mut ctx = ParseContext::default();
+        let (f, _) = parse_target_with_ctx("the exiled card", &mut ctx);
         assert_eq!(
             f,
             TargetFilter::TrackedSet {

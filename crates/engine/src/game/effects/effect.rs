@@ -188,6 +188,28 @@ fn register_transient_effect(
             }
         }
         Some(TargetFilter::None) | None => {}
+        // CR 608.2k: A grant whose affected object is the ability's cost-paid
+        // object (Jhoira of the Ghitu's suspend grant — "If it doesn't have
+        // suspend, it gains suspend", the "it" anaphor parsed as `ParentTarget`
+        // on the suspend-grant sub_ability). The exiled card is in the exile
+        // zone, so the battlefield-scan branch below cannot reach it; resolve
+        // directly from the recursively-stamped `cost_paid_object`. A bare
+        // `ParentTarget` with no chosen targets but a stamped cost-paid object
+        // is treated as the cost-paid reference (the parent acted on it).
+        Some(TargetFilter::CostPaidObject) | Some(TargetFilter::ParentTarget)
+            if ability.targets.is_empty() && ability.cost_paid_object.is_some() =>
+        {
+            if let Some(snap) = &ability.cost_paid_object {
+                state.add_transient_continuous_effect(
+                    ability.source_id,
+                    ability.controller,
+                    duration.clone(),
+                    TargetFilter::SpecificObject { id: snap.object_id },
+                    modifications.clone(),
+                    static_def.condition.clone(),
+                );
+            }
+        }
         Some(filter) => {
             let filter = crate::game::effects::resolved_object_filter(ability, filter);
             let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter);

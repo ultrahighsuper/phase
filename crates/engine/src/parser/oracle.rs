@@ -2813,6 +2813,26 @@ fn activation_zone_from_self_effect(def: &AbilityDefinition) -> Option<Zone> {
         .and_then(activation_zone_from_self_effect)
 }
 
+/// CR 608.2k: Source zone of a non-self `AbilityCost::Exile` component
+/// ("Exile a nonland card from your hand"), if present. Effect-side companion
+/// to `activation_zone_from_self_cost`: returns `None` for a self-ref exile
+/// (Scavenge), which is auto-paid and never back-referenced as a cost-paid
+/// object. Recurses into `Composite`.
+fn non_self_exile_cost_zone(cost: &AbilityCost) -> Option<Zone> {
+    match cost {
+        AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            ..
+        } => None,
+        AbilityCost::Exile {
+            zone: Some(zone @ (Zone::Hand | Zone::Graveyard)),
+            ..
+        } => Some(*zone),
+        AbilityCost::Composite { costs } => costs.iter().find_map(non_self_exile_cost_zone),
+        _ => None,
+    }
+}
+
 fn parse_activated_ability_definition(
     cost_text: &str,
     effect_text: &str,
@@ -2824,9 +2844,17 @@ fn parse_activated_ability_definition(
     let normalized_cost_text = normalize_self_refs_for_static(cost_text, card_name);
     let cost = parse_oracle_cost(&normalized_cost_text);
 
+    // CR 608.2k: expose this ability's exile-cost source zone so the effect
+    // parser can disambiguate "the exiled card" as a cost-paid-object
+    // reference. Restored after the effect parse — no leak to sibling abilities.
+    let prev_exile_zone = ctx.current_ability_exile_cost_zone.take();
+    ctx.current_ability_exile_cost_zone = non_self_exile_cost_zone(&cost);
+
     // Retry with `~` normalization if the first pass left an Unimplemented node
     // or emitted a target-fallback warning.
     let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name, ctx);
+
+    ctx.current_ability_exile_cost_zone = prev_exile_zone;
     normalize_activated_mana_instead_delta(&mut def);
     if def.activation_zone.is_none() {
         def.activation_zone = activation_zone_from_self_cost(&cost);

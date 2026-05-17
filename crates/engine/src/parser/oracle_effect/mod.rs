@@ -10563,6 +10563,10 @@ pub(crate) fn parse_effect_chain_ir(
             // self-reference so a `"that creature"` copy-token anaphor in any
             // chunk of an Aura/bestow card remaps to the enchanted host.
             host_self_reference: ctx.host_self_reference.clone(),
+            // CR 608.2k: propagate the enclosing ability's exile-cost source
+            // zone so a `"the exiled card"` anaphor in any effect chunk
+            // disambiguates to `CostPaidObject` (Jhoira of the Ghitu).
+            current_ability_exile_cost_zone: ctx.current_ability_exile_cost_zone,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
