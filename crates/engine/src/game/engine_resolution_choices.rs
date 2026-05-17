@@ -24,6 +24,40 @@ pub(super) enum ResolutionChoiceOutcome {
     ActionResult(ActionResult),
 }
 
+/// CR 603.2 + CR 603.3b: After a resolution-choice handler has moved objects
+/// (sacrifice, change-zone, bounce, discard) and resolved any reflexive
+/// continuation, dispatch the observer triggers (dies-, discarded-, etc.)
+/// produced by that move across a possible continuation pause.
+///
+/// `event_slice_start..event_slice_end` MUST bound the move's OWN events,
+/// captured BEFORE the continuation drain so that continuation-produced events
+/// are excluded.
+///
+/// Returns `Some(WaitingFor)` only in the B1 settled case when a drained
+/// deferred trigger itself needs player input; the caller must propagate it.
+fn batch_or_drain_observer_triggers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    event_slice_start: usize,
+    event_slice_end: usize,
+) -> Option<WaitingFor> {
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        // B1: this action settled — `run_post_action_pipeline` scans this
+        // action's own events; only the prior parked queue needs draining.
+        super::triggers::drain_deferred_trigger_queue(state, events)
+    } else {
+        // B2: paused — `run_post_action_pipeline` will not scan this action.
+        // Park this move's observer triggers for a later settle.
+        let trigger_events: Vec<GameEvent> = events[event_slice_start..event_slice_end]
+            .iter()
+            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .cloned()
+            .collect();
+        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        None
+    }
+}
+
 pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
@@ -1185,6 +1219,7 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            let events_before_effect = events.len();
             for &card_id in &chosen {
                 if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
                     effects::discard::discard_as_cost_with_source(
@@ -1200,13 +1235,56 @@ pub(super) fn handle_resolution_choice(
                     return Ok(action_result_outcome(events, state.waiting_for.clone()));
                 }
             }
+            let events_after_move = events.len();
+
+            // CR 608.2e + CR 609.3: APNAP discard steps accumulate into one
+            // tracked set. The discard handler is the single authority for
+            // recording the cards it moved — `discard_as_cost_with_source`
+            // runs outside `resolve_effect`, so its non-interactive sibling's
+            // `next_sub_needs_tracked_set` publish never fires for it. Publish
+            // the cards that reached the graveyard here; `chain_tracked_set_id`
+            // is preserved across the per-opponent continuation pause, so each
+            // opponent's publish extends the same set and the "draw a card for
+            // each card discarded this way" tail reads the union.
+            // CR 701.9c: only graveyard-bound cards count — a replacement
+            // redirect (Madness) to another zone is excluded by the filter.
+            let discarded_to_graveyard: Vec<ObjectId> = events[events_before_effect..]
+                .iter()
+                .filter_map(|ev| match ev {
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        to: Zone::Graveyard,
+                        ..
+                    } => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+            if !discarded_to_graveyard.is_empty() {
+                effects::publish_tracked_set(state, discarded_to_graveyard);
+            }
 
             state.last_effect_count = Some(chosen.len() as i32);
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
                 source_id,
             });
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            let waiting_for = finish_with_continuation(state, player, events);
+
+            // CR 603.2c: each opponent's discard is a separate occurrence of a
+            // `Discarded`-mode trigger event. The resolution-choice dispatch
+            // path does not call `run_post_action_pipeline` for a non-settled
+            // action, so batch this discard's observer triggers (Waste Not,
+            // Megrim, Bone Miser) across the `DiscardChoice` pause — exactly
+            // as the `Sacrifice` branch does for dies-triggers.
+            if let Some(wf) = batch_or_drain_observer_triggers(
+                state,
+                events,
+                events_before_effect,
+                events_after_move,
+            ) {
+                return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+            }
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (
             WaitingFor::EffectZoneChoice {
@@ -1417,33 +1495,13 @@ pub(super) fn handle_resolution_choice(
                 EffectKind::Sacrifice | EffectKind::ChangeZone | EffectKind::BounceAll
             );
             if moves_permanents {
-                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    // B1: the reflexive continuation (if any) resolved without
-                    // input. `run_post_action_pipeline` will scan THIS action's
-                    // `events` and fire this move's dies-triggers normally — so
-                    // they are NOT collected here (that would double-fire).
-                    // But a *prior* paused action may have parked dies-triggers
-                    // in `deferred_triggers` (its `run_post_action_pipeline`
-                    // never ran); now that the game is settling to `Priority`,
-                    // drain that queue. If a drained trigger needs input, hand
-                    // back its `WaitingFor`.
-                    if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
-                        return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
-                    }
-                } else {
-                    // B2: the reflexive continuation paused on player input, so
-                    // `run_post_action_pipeline`'s trigger scan will NOT run for
-                    // this action. Batch this move's dies-triggers into
-                    // `deferred_triggers` — the next handler that settles to
-                    // `Priority`, or `finalize_trigger_target_selection`, drains
-                    // them.
-                    let trigger_events: Vec<GameEvent> = events
-                        [events_before_effect..events_after_move]
-                        .iter()
-                        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-                        .cloned()
-                        .collect();
-                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                if let Some(wf) = batch_or_drain_observer_triggers(
+                    state,
+                    events,
+                    events_before_effect,
+                    events_after_move,
+                ) {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
                 }
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())

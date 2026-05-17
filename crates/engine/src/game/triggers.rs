@@ -3102,10 +3102,10 @@ pub mod tests {
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
         AggregateFunction, ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification,
         ControllerRef, DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer,
-        KickerVariant, MultiTargetSpec, PaymentCost, PlayerScope, QuantityExpr, QuantityRef,
-        ResolvedAbility, SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition,
-        TargetFilter, TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition,
-        TypeFilter, TypedFilter,
+        KickerVariant, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, QuantityExpr,
+        QuantityRef, ResolvedAbility, SharedQuality, SharedQualityRelation, StaticCondition,
+        StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerConstraint,
+        TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -11164,6 +11164,170 @@ pub mod tests {
             .map(|(_, n)| *n)
             .sum();
         assert_eq!(p1p1, 1, "Undying returns with exactly one +1/+1 counter");
+    }
+
+    /// CR 603.2c + CR 608.2e + issue #456: Syphon Mind ("Each other player
+    /// discards a card. You draw a card for each card discarded this way.")
+    /// resolving in a 4-player game while the controller has Waste Not on the
+    /// battlefield. Each of the three opponents discards one noncreature,
+    /// nonland card via an interactive `DiscardChoice`.
+    ///
+    /// Pre-fix this drew 1 (Waste Not fired once, Syphon Mind's TrackedSetSize
+    /// read 0). Post-fix the controller must draw exactly 6: 3 from Syphon
+    /// Mind's `Draw { Ref(TrackedSetSize) }` tail (all three discards
+    /// accumulate into one chain tracked set across the continuation pauses)
+    /// plus 3 from Waste Not's `Discarded` trigger firing once per opponent.
+    #[test]
+    fn syphon_mind_with_waste_not_four_player_draws_six() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 4, 99);
+        state.phase = Phase::PreCombatMain;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // P0 controls a Waste Not stand-in: a battlefield permanent carrying
+        // the noncreature-nonland `Discarded` trigger ("Whenever an opponent
+        // discards a noncreature, nonland card, draw a card.") — the parsed
+        // AST is `valid_card: Typed{[Card], controller: Opponent}`,
+        // `execute: Draw{1}`.
+        let waste_not = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Waste Not".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let trigger = TriggerDefinition::new(TriggerMode::Discarded)
+                .valid_card(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Card).controller(ControllerRef::Opponent),
+                ))
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                ))
+                .description(
+                    "Whenever an opponent discards a noncreature, nonland card, draw a card."
+                        .to_string(),
+                );
+            let obj = state.objects.get_mut(&waste_not).unwrap();
+            obj.trigger_definitions.push(trigger.clone());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+        }
+
+        // Each of the three opponents holds two noncreature, nonland cards so
+        // every discard routes through an interactive `DiscardChoice`.
+        for opp in 1..4u8 {
+            for c in 0..2u64 {
+                create_object(
+                    &mut state,
+                    CardId(u64::from(opp) * 100 + c),
+                    PlayerId(opp),
+                    format!("P{opp} Spell {c}"),
+                    Zone::Hand,
+                );
+            }
+        }
+        // P0's library must hold at least 6 cards for the draws to land.
+        for i in 0..10u64 {
+            create_object(
+                &mut state,
+                CardId(900 + i),
+                PlayerId(0),
+                format!("P0 Lib {i}"),
+                Zone::Library,
+            );
+        }
+
+        // Syphon Mind on the stack — exactly the parsed AST: a `player_scope:
+        // Opponent` `Discard{1}` with a `Draw { Ref(TrackedSetSize) }` tail.
+        let syphon_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Syphon Mind".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&syphon_id).unwrap().zone = Zone::Stack;
+        let mut syphon = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            syphon_id,
+            PlayerId(0),
+        );
+        syphon.player_scope = Some(PlayerFilter::Opponent);
+        syphon.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            syphon_id,
+            PlayerId(0),
+        )));
+        state.stack.push_back(StackEntry {
+            id: syphon_id,
+            source_id: syphon_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(2),
+                ability: Some(syphon),
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let p0_hand_before = state.players[0].hand.len();
+
+        // Resolve Syphon Mind off the stack — pauses on opponent 1's discard.
+        resolve_stack_until_paused(&mut state);
+
+        // Drive each opponent's interactive `DiscardChoice` through the real
+        // `apply` pipeline (so the final settle runs `run_post_action_pipeline`).
+        let mut discards = 0;
+        for _ in 0..60 {
+            match &state.waiting_for {
+                WaitingFor::DiscardChoice { cards, .. } => {
+                    let pick = vec![cards[0]];
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::SelectCards { cards: pick },
+                    )
+                    .expect("opponent discards a card");
+                    discards += 1;
+                }
+                WaitingFor::Priority { .. } if state.stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                        .expect("pass priority to resolve Waste Not triggers");
+                }
+                other => panic!("unexpected waiting_for during discard: {other:?}"),
+            }
+        }
+
+        assert_eq!(discards, 3, "all three opponents discard exactly once");
+
+        // CR 603.2c: Waste Not triggered once per opponent discard → 3 draws.
+        // CR 608.2e: Syphon Mind's TrackedSetSize == 3 → 3 more draws.
+        let drawn = state.players[0].hand.len() - p0_hand_before;
+        assert_eq!(
+            drawn, 6,
+            "controller must draw exactly 6 (3 Syphon Mind for-each + 3 Waste Not), got {drawn}"
+        );
     }
 
     /// CR 702.93a + issue #423 (4b): the negative path — an Undying creature

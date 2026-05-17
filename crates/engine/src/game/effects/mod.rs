@@ -1253,6 +1253,13 @@ fn affected_objects_from_events(effect: &Effect, events: &[GameEvent]) -> Vec<Ob
                 // sub-ability resolve against exactly the milled cards.
                 Effect::Mill { destination, .. } => Some(*destination),
                 Effect::ExileTop { .. } => Some(crate::types::zones::Zone::Exile),
+                // CR 701.9a: discarded cards land in the graveyard; "for each
+                // card discarded this way" counts exactly those (CR 701.9c
+                // excludes a discard redirected by a replacement to another
+                // zone — e.g. Madness — which must not be tracked here).
+                Effect::Discard { .. } | Effect::DiscardCard { .. } => {
+                    Some(crate::types::zones::Zone::Graveyard)
+                }
                 // CR 400.7 + CR 611.2c: Mass-bounce destination defaults to
                 // Hand; downstream "those creatures" / "for each of those
                 // permanents" tracking must filter by the actual landing zone.
@@ -1276,7 +1283,7 @@ fn affected_objects_from_events(effect: &Effect, events: &[GameEvent]) -> Vec<Ob
     }
 }
 
-fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<ObjectId>) {
+pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<ObjectId>) {
     // CR 603.7 + CR 608.2c: Chain unification. If an ancestor in this
     // resolution chain already published a tracked set, extend that set with
     // the current publish so compound zone-changing effects expose every
@@ -9280,6 +9287,95 @@ mod tests {
             state.tracked_object_sets.get(&fresh),
             Some(&vec![]),
             "empty selection produces an empty fresh set"
+        );
+    }
+
+    /// CR 608.2e + CR 701.9a: Building-block test for issue #456. A
+    /// `player_scope: Opponent` `Discard` with a `Draw { Ref(TrackedSetSize) }`
+    /// tail must accumulate every opponent's discarded card into ONE chain
+    /// tracked set across the per-opponent interactive `DiscardChoice` pauses,
+    /// so the trailing `Draw` reads the union (count == 3 for 3 opponents).
+    #[test]
+    fn discard_choice_publishes_tracked_set_across_continuation() {
+        let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+
+        // P0's library: cards for the trailing Draw to draw.
+        for i in 0..6 {
+            create_object(
+                &mut state,
+                CardId(900 + i),
+                PlayerId(0),
+                format!("Lib {i}"),
+                Zone::Library,
+            );
+        }
+        // Each opponent holds 2 hand cards so its discard is interactive
+        // (hand > count → DiscardChoice).
+        for opp in 1..4u8 {
+            for c in 0..2u64 {
+                create_object(
+                    &mut state,
+                    CardId(u64::from(opp) * 100 + c),
+                    PlayerId(opp),
+                    format!("P{opp} card {c}"),
+                    Zone::Hand,
+                );
+            }
+        }
+
+        // Syphon-Mind-shaped ability: each opponent discards one card, then the
+        // controller draws one card per card discarded this way.
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(0),
+        )));
+
+        let p0_hand_before = state.players[0].hand.len();
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Resolve each opponent's interactive discard via the real pipeline.
+        let mut select_actions = 0;
+        while let WaitingFor::DiscardChoice { player, cards, .. } = &state.waiting_for {
+            let pick = vec![cards[0]];
+            let _ = *player;
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::SelectCards { cards: pick },
+            )
+            .unwrap();
+            select_actions += 1;
+            assert!(select_actions <= 3, "must not loop past 3 opponents");
+        }
+
+        assert_eq!(select_actions, 3, "three opponents each discard once");
+        // The trailing Draw reads TrackedSetSize == 3 (one card per opponent
+        // discard, accumulated across the continuation pauses).
+        assert_eq!(
+            state.players[0].hand.len() - p0_hand_before,
+            3,
+            "controller draws one card per card discarded this way (3 total)"
         );
     }
 }
