@@ -796,49 +796,80 @@ pub(super) fn match_damage_done_once_by_controller(
     source_ids.contains(&source_id)
 }
 
-// CR 603.6a: SpellCast trigger fires when a spell is placed on the stack.
+/// CR 601.2a vs CR 707.10: whether an event placed a spell on the stack by
+/// *casting* it or by *copying* it. These are distinct game events — a copy
+/// isn't cast — so copy-sensitive and cast-only triggers must be told apart.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpellOnStackClass {
+    Cast,
+    Copy,
+}
+
+// CR 603.6a + CR 707.10: spell-on-stack trigger. `SpellCast` fires only on a
+// cast, `SpellCopy` only on a copy, and `SpellCastOrCopy` (Magecraft) on both.
 pub(super) fn match_spell_cast(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::SpellCast {
-        controller,
-        object_id,
-        ..
-    } = event
+    // Extract the (controller, spell object) tuple and the event class. Both
+    // `SpellCast` and `SpellCopied` carry full stack characteristics for the
+    // spell object, so the shared filter checks below work unchanged.
+    let (controller, object_id, class) = match event {
+        GameEvent::SpellCast {
+            controller,
+            object_id,
+            ..
+        } => (controller, object_id, SpellOnStackClass::Cast),
+        GameEvent::SpellCopied {
+            controller,
+            object_id,
+            ..
+        } => (controller, object_id, SpellOnStackClass::Copy),
+        _ => return false,
+    };
+
+    // CR 707.10: gate the event class against the trigger's mode.
+    let accepts = match (&trigger.mode, class) {
+        (TriggerMode::SpellCast, SpellOnStackClass::Cast)
+        | (TriggerMode::SpellCopy, SpellOnStackClass::Copy)
+        | (TriggerMode::SpellCastOrCopy, _) => true,
+        (TriggerMode::SpellCast, SpellOnStackClass::Copy)
+        | (TriggerMode::SpellCopy, SpellOnStackClass::Cast) => false,
+        // `match_spell_cast` is only registered for the three spell-on-stack
+        // modes; any other mode reaching here is a registry wiring bug.
+        _ => false,
+    };
+    if !accepts {
+        return false;
+    }
+
+    // Check valid_card filter on the spell object.
+    if trigger.valid_card.is_some() && !valid_card_matches(trigger, state, *object_id, source_id) {
+        return false;
+    }
+    // CR 115.9c: Check "that targets only [X]" constraint against the spell's actual targets.
+    if let Some(targets_only_filter) = trigger
+        .valid_card
+        .as_ref()
+        .and_then(super::filter::extract_targets_only)
     {
-        // Check valid_card filter on the cast spell
-        if trigger.valid_card.is_some()
-            && !valid_card_matches(trigger, state, *object_id, source_id)
-        {
+        if !stack_entry_targets_only(state, *object_id, &targets_only_filter, source_id) {
             return false;
         }
-        // CR 115.9c: Check "that targets only [X]" constraint against the spell's actual targets.
-        if let Some(targets_only_filter) = trigger
-            .valid_card
-            .as_ref()
-            .and_then(super::filter::extract_targets_only)
-        {
-            if !stack_entry_targets_only(state, *object_id, &targets_only_filter, source_id) {
-                return false;
-            }
-        }
-        // CR 115.9b: Check "that targets [X]" constraint (.any() semantics).
-        if let Some(targets_filter) = trigger
-            .valid_card
-            .as_ref()
-            .and_then(super::filter::extract_targets)
-        {
-            if !stack_entry_targets_any(state, *object_id, &targets_filter, source_id) {
-                return false;
-            }
-        }
-        valid_player_matches(trigger, state, *controller, source_id)
-    } else {
-        false
     }
+    // CR 115.9b: Check "that targets [X]" constraint (.any() semantics).
+    if let Some(targets_filter) = trigger
+        .valid_card
+        .as_ref()
+        .and_then(super::filter::extract_targets)
+    {
+        if !stack_entry_targets_any(state, *object_id, &targets_filter, source_id) {
+            return false;
+        }
+    }
+    valid_player_matches(trigger, state, *controller, source_id)
 }
 
 // CR 508.1a + CR 603.2: Attacks trigger fires when a creature is declared as an attacker.

@@ -96,6 +96,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::PriorityPassed { .. } => LogCategory::Turn,
 
         GameEvent::SpellCast { .. }
+        | GameEvent::SpellCopied { .. }
         | GameEvent::AbilityActivated { .. }
         | GameEvent::NinjutsuActivated { .. }
         | GameEvent::BoastAbilityActivated { .. }
@@ -241,6 +242,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         } => vec![
             player_seg(state, *controller),
             text(" casts "),
+            card_seg(state, *object_id),
+        ],
+
+        GameEvent::SpellCopied {
+            controller,
+            object_id,
+            ..
+        } => vec![
+            player_seg(state, *controller),
+            text(" copies "),
             card_seg(state, *object_id),
         ],
 

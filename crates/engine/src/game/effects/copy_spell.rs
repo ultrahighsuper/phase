@@ -91,8 +91,31 @@ pub fn resolve(
         kind: copy_kind,
     };
 
+    // CR 707.10: Capture the copied spell's card id before the entry is moved
+    // onto the stack. Only spell copies emit `SpellCopied` — copying an
+    // activated/triggered ability is not "copying a spell", so Magecraft and
+    // other copy-an-instant-or-sorcery-spell triggers must not see it.
+    let copied_spell_card_id = match &copy_entry.kind {
+        StackEntryKind::Spell { card_id, .. } => Some(*card_id),
+        StackEntryKind::ActivatedAbility { .. }
+        | StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::KeywordAction { .. } => None,
+    };
+
     state.stack.push_back(copy_entry);
     events.push(GameEvent::StackPushed { object_id: copy_id });
+
+    // CR 707.10: A copy of a spell is itself a spell on the stack, but it
+    // isn't cast. Emit a distinct `SpellCopied` event so copy-sensitive
+    // triggers (Magecraft) fire without wrongly firing cast-only triggers.
+    if let Some(card_id) = copied_spell_card_id {
+        events.push(GameEvent::SpellCopied {
+            card_id,
+            controller: copy_controller,
+            object_id: copy_id,
+            original_id: top_entry.id,
+        });
+    }
 
     // CR 707.10c: If the copy has targets, allow the controller to choose new ones.
     let copy_targets = top_entry
@@ -877,6 +900,190 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, GameEvent::EffectResolved { .. })));
+    }
+
+    /// CR 707.10 + CR 207.2c (Magecraft ability word): copying an instant or
+    /// sorcery spell fires a `TriggerMode::SpellCastOrCopy` trigger (Magecraft).
+    /// Pipeline test: drives the real `copy_spell::resolve` → `process_triggers`
+    /// path, not a synthetic `GameEvent`. Fails on `main` (the copy emitted no
+    /// cast/copy event, so no trigger was placed).
+    #[test]
+    fn magecraft_trigger_fires_when_a_sorcery_is_copied() {
+        use crate::game::triggers::process_triggers;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityDefinition, AbilityKind, TriggerDefinition};
+        use crate::types::card_type::CoreType;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Magecraft permanent on the battlefield controlled by P0.
+        let witch_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Sedgemoor Witch".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let witch = state.objects.get_mut(&witch_id).unwrap();
+            witch.card_types.core_types.push(CoreType::Creature);
+            witch.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::SpellCastOrCopy)
+                    .valid_card(TargetFilter::Any)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    )),
+            );
+        }
+
+        // A sorcery spell on the stack, controlled by the Magecraft player.
+        let sorcery = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Divination",
+            sorcery,
+            CastingVariant::Normal,
+        );
+
+        // Drive the real copy resolver.
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        // The copy emitted a `SpellCopied` event.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::SpellCopied { .. })),
+            "copy resolver must emit SpellCopied"
+        );
+        // Two spells on the stack: original + copy.
+        assert_eq!(state.stack.len(), 2);
+
+        // Drive the normal post-event trigger pass with the resolver's events.
+        process_triggers(&mut state, &events);
+
+        // CR 707.10: the Magecraft trigger landed on the stack.
+        let magecraft_triggers = state
+            .stack
+            .iter()
+            .filter(|e| {
+                matches!(&e.kind, StackEntryKind::TriggeredAbility { source_id, .. }
+                    if *source_id == witch_id)
+            })
+            .count();
+        assert_eq!(
+            magecraft_triggers, 1,
+            "Magecraft (SpellCastOrCopy) must fire exactly once when a spell is copied"
+        );
+    }
+
+    /// CR 707.10: "a copy of a spell isn't cast." A `SpellCast`-only trigger
+    /// (Prowess-style) must NOT fire when a spell is merely copied. Guards the
+    /// discriminator: emitting `SpellCast` for a copy would be rules-incorrect.
+    #[test]
+    fn spell_cast_only_trigger_does_not_fire_when_a_spell_is_copied() {
+        use crate::game::triggers::process_triggers;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityDefinition, AbilityKind, TriggerDefinition};
+        use crate::types::card_type::CoreType;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // A SpellCast-only observer on the battlefield controlled by P0.
+        let observer_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Cast Observer".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let observer = state.objects.get_mut(&observer_id).unwrap();
+            observer.card_types.core_types.push(CoreType::Creature);
+            observer.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::SpellCast)
+                    .valid_card(TargetFilter::Any)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    )),
+            );
+        }
+
+        let sorcery = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Divination",
+            sorcery,
+            CastingVariant::Normal,
+        );
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+        process_triggers(&mut state, &events);
+
+        // CR 707.10: no SpellCast-only trigger landed — a copy isn't cast.
+        let cast_triggers = state
+            .stack
+            .iter()
+            .filter(|e| {
+                matches!(&e.kind, StackEntryKind::TriggeredAbility { source_id, .. }
+                    if *source_id == observer_id)
+            })
+            .count();
+        assert_eq!(
+            cast_triggers, 0,
+            "a SpellCast-only trigger must not fire on a copied (not cast) spell"
+        );
     }
 
     #[test]

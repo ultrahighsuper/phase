@@ -112,6 +112,16 @@ pub enum GameEvent {
         controller: PlayerId,
         object_id: ObjectId, // CR 601.2a: The spell object on the stack
     },
+    /// CR 707.10: A spell was copied onto the stack. A copy of a spell isn't
+    /// cast, so this is a distinct event from `SpellCast` — copy-sensitive
+    /// triggers (Magecraft, "whenever you copy a spell") fire on this, while
+    /// cast-only triggers (Prowess, storm, cascade) do not.
+    SpellCopied {
+        card_id: CardId,
+        controller: PlayerId,
+        object_id: ObjectId,   // the copy's stack object id
+        original_id: ObjectId, // CR 707.10: the spell that was copied
+    },
     /// CR 107.1b + CR 601.2f: The caster has chosen the value of X for a
     /// pending cast whose cost contained `ManaCostShard::X`.
     XValueChosen {
