@@ -1880,11 +1880,15 @@ fn apply_action(
             // CR 603.3b (#531): if the inline trigger scan paused on an
             // OrderTriggers prompt (controller has 2+ simultaneous TapsForMana
             // multipliers, etc.), surface that prompt instead of overwriting
-            // it with the resume `wf` (Priority/ManaPayment).
-            if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+            // it with the resume `wf` (Priority/ManaPayment). Preserve `wf`
+            // so `handle_order_triggers` can resume the interrupted chain
+            // after the ordered triggered mana abilities dispatch.
+            if let Some(order_wf) =
+                super::triggers::preserve_order_triggers_resume(state, wf.clone())
+            {
                 return Ok(ActionResult {
                     events,
-                    waiting_for: state.waiting_for.clone(),
+                    waiting_for: order_wf,
                     log_entries: vec![],
                 });
             }
@@ -2365,6 +2369,15 @@ fn apply_action(
                     let mana_events: Vec<_> = events[events_before..].to_vec();
                     super::triggers::process_triggers(state, &mana_events);
                 }
+                if let Some(order_wf) =
+                    super::triggers::preserve_order_triggers_resume(state, wf.clone())
+                {
+                    return Ok(ActionResult {
+                        events,
+                        waiting_for: order_wf,
+                        log_entries: vec![],
+                    });
+                }
                 wf
             } else {
                 return Err(EngineError::ActionNotAllowed(
@@ -2396,10 +2409,20 @@ fn apply_action(
                 let mana_events: Vec<_> = events[events_before..].to_vec();
                 super::triggers::process_triggers(state, &mana_events);
             }
-            WaitingFor::ManaPayment {
+            let wf = WaitingFor::ManaPayment {
                 player: *player,
                 convoke_mode: *convoke_mode,
+            };
+            if let Some(order_wf) =
+                super::triggers::preserve_order_triggers_resume(state, wf.clone())
+            {
+                return Ok(ActionResult {
+                    events,
+                    waiting_for: order_wf,
+                    log_entries: vec![],
+                });
             }
+            wf
         }
         (
             WaitingFor::ManaPayment {
@@ -9252,15 +9275,21 @@ mod tests {
         )
         .unwrap();
 
-        // CR 603.3b (#531): the 2 simultaneous multiplier triggers raise an
-        // OrderTriggers prompt before the resume can return to ManaPayment.
-        // Drain with identity order. NOTE: after the drain the engine sits at
-        // Priority rather than ManaPayment — the original `pending.resume`
-        // context lived on the consumed `ChooseManaColor` `WaitingFor`, and
-        // preserving the resume across an OrderTriggers interruption is out
-        // of scope for #531. The mana-pool assertion below — the actual
-        // behaviour this regression test guards — still holds.
+        // CR 603.3b + CR 605.4a: the 2 simultaneous multiplier triggers raise
+        // an OrderTriggers prompt before the resume can return to ManaPayment.
+        // Draining the ordering prompt must restore the suspended payment step.
         crate::game::triggers::drain_order_triggers_with_identity(&mut state);
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ManaPayment {
+                    player: PlayerId(0),
+                    convoke_mode: None,
+                }
+            ),
+            "OrderTriggers drain must resume ManaPayment, got {:?}",
+            state.waiting_for
+        );
 
         // 1 base + 2 multiplier = 3 — fired exactly once, not dropped, not doubled.
         let total = state.players[0].mana_pool.total();
