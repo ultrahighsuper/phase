@@ -20118,7 +20118,7 @@ mod tests {
             );
             assert!(
                 state.stack.iter().any(|s| s.source_id == spell),
-                "CR 601.2k: successful cast must push the spell onto the stack"
+                "CR 601.2a: successful cast must push the spell onto the stack"
             );
         }
 
@@ -20265,7 +20265,7 @@ mod tests {
             );
             assert!(
                 state.stack.iter().any(|s| s.source_id == spell),
-                "CR 601.2k: successful cast must push the spell onto the stack"
+                "CR 601.2a: successful cast must push the spell onto the stack"
             );
         }
 

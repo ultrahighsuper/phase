@@ -20332,4 +20332,58 @@ mod snapshot_tests {
             "expected the devotion condition attached"
         );
     }
+
+    /// CR 107.4f (Phyrexian shape) + K'rrik 2024-06-07 ruling: K'rrik's
+    /// granted permission "For each {B} in a cost, you may pay 2 life
+    /// rather than pay that mana" must lower to `PayLifeAsColoredMana`
+    /// targeting the correct color. Guards the parser regression that the
+    /// runtime tests in `casting.rs` cannot catch (they synthesize the
+    /// `StaticDefinition` directly, bypassing this combinator).
+    #[test]
+    fn parse_pay_life_as_colored_mana_for_krrik() {
+        let def = parse_static_line(
+            "For each {B} in a cost, you may pay 2 life rather than pay that mana.",
+        )
+        .expect("K'rrik line must parse to a StaticDefinition");
+        assert_eq!(
+            def.mode,
+            StaticMode::PayLifeAsColoredMana {
+                color: crate::types::mana::ManaColor::Black,
+            },
+        );
+        assert!(matches!(def.affected, Some(TargetFilter::Player)));
+    }
+
+    /// The combinator must reject other colors only by routing the wrong
+    /// `ManaColor`, not by silently dropping. Verifies the {R} variant
+    /// lowers symmetrically — guards against the `alt(...)` branch order
+    /// regressing color identification.
+    #[test]
+    fn parse_pay_life_as_colored_mana_red_variant() {
+        let def = parse_static_line(
+            "For each {R} in a cost, you may pay 2 life rather than pay that mana.",
+        )
+        .expect("Red-variant line must parse to a StaticDefinition");
+        assert_eq!(
+            def.mode,
+            StaticMode::PayLifeAsColoredMana {
+                color: crate::types::mana::ManaColor::Red,
+            },
+        );
+    }
+
+    /// CR 107.4f: only the 2-life Phyrexian shape exists in print today.
+    /// Other life values must fall through to `Unimplemented` (return
+    /// `None`) so coverage surfaces the gap rather than silently casting
+    /// the substitution at a wrong rate.
+    #[test]
+    fn parse_pay_life_as_colored_mana_rejects_non_two_life() {
+        assert!(
+            parse_static_line(
+                "For each {B} in a cost, you may pay 3 life rather than pay that mana."
+            )
+            .is_none(),
+            "non-2-life variants must not bind to PayLifeAsColoredMana"
+        );
+    }
 }
