@@ -1595,9 +1595,13 @@ fn effect_refs_parent_target(effect: &Effect) -> bool {
 ///    is a context ref (`source_filter: None && target.is_context_ref()`), which
 ///    is exactly when `target_filter()` returns `owner` instead of `target`, so
 ///    `target` is never double-counted.
-///  * `Effect::Token` surfaces `owner` (a player ref) and hides `attach_to` —
+///  * `Effect::Token` surfaces a *targetable* `attach_to` (the single-target
+///    "attached to target creature" host) but hides a *context-ref* `attach_to`
+///    (`ParentTarget`), surfacing `owner` instead. The arm fires ONLY when
+///    `attach_to.is_context_ref()` — exactly when `target_filter()` returns
+///    `owner` rather than `attach_to` — so the filter is never double-counted.
 ///    Asinine Antics' "for each opponent creature, create a Cursed Role attached
-///    to that creature" rebinds through `attach_to`.
+///    to that creature" rebinds through this hidden `ParentTarget` slot.
 ///  * `Effect::Attach` surfaces `target` but hides `attachment`.
 ///
 /// NOTE: the `_ => {}` arm means "no hidden object slot beyond `target_filter()`".
@@ -1613,7 +1617,7 @@ fn effect_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
         } if target.is_context_ref() => slots.push(target),
         Effect::Token {
             attach_to: Some(f), ..
-        } => slots.push(f),
+        } if f.is_context_ref() => slots.push(f),
         Effect::Attach { attachment, .. } => slots.push(attachment),
         _ => {}
     }

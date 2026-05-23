@@ -3399,4 +3399,130 @@ mod tests {
             "no opponent creatures ⇒ zero Role tokens"
         );
     }
+
+    /// CR 115.1a + CR 601.2c: Betroth the Beast — "Create a Royal Role token
+    /// attached to target creature you control." Drives the REAL cast pipeline:
+    /// the spell must enter `TargetSelection` (proving `target_filter()` now
+    /// surfaces the targetable `attach_to`), the controller selects creature B,
+    /// and after resolution the Role attaches to B.
+    ///
+    /// DISCRIMINATING: before `Effect::Token::target_filter()` surfaces a
+    /// targetable `attach_to`, no target slot is generated — `CastSpell` would NOT
+    /// enter `TargetSelection`, so the first assertion fails and creature B can
+    /// never be chosen.
+    #[test]
+    fn single_target_role_spell_targets_and_attaches_to_chosen_creature() {
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let parsed = crate::parser::parse_oracle_text(
+            "Create a Royal Role token attached to target creature you control.",
+            "Betroth the Beast",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let spell_ability = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(*a.effect, Effect::Token { .. }))
+            .expect("Betroth the Beast parses to a Token spell ability")
+            .clone();
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let creature_a = spawn_creature(&mut state, PlayerId(0), "Bear A");
+        let creature_b = spawn_creature(&mut state, PlayerId(0), "Bear B");
+
+        let spell = create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Betroth the Beast".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(spell_ability);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::White],
+                generic: 0,
+            };
+        }
+        // Pay {W}.
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::White,
+            source_id: ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(903),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(result.waiting_for, WaitingFor::TargetSelection { .. }),
+            "targetable attach_to must surface a target slot (got {:?})",
+            result.waiting_for
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(creature_b)],
+            },
+        )
+        .unwrap();
+
+        // Drive priority passes until the stack resolves.
+        for _ in 0..6 {
+            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            let _ = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+
+        let role = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .find(|obj| obj.is_token && obj.card_types.subtypes.iter().any(|s| s == "Role"))
+            .expect("a Royal Role token must be created");
+        assert_eq!(
+            role.attached_to,
+            Some(AttachTarget::Object(creature_b)),
+            "Role must attach to the chosen target (B), not A"
+        );
+        assert!(
+            state.objects[&creature_b]
+                .attachments
+                .iter()
+                .any(|&id| state.objects[&id]
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|s| s == "Role")),
+            "creature B's attachments must include the Role"
+        );
+        assert!(
+            state.objects[&creature_a].attachments.is_empty(),
+            "creature A (not chosen) must have no attachments"
+        );
+    }
 }
