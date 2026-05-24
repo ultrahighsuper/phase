@@ -55,6 +55,10 @@ export type LogDefaultState = "open" | "closed";
 export type BattlefieldCardDisplay = "art_crop" | "full_card";
 export type TapRotation = "mtga" | "classic";
 export type SpellPaymentMode = "auto" | "manual";
+/** Which screen edge the resolving-stack panel docks to (and collapses toward).
+ *  User-chosen so a player can keep the stack off whichever side of the
+ *  battlefield they care about — e.g. dock left to free the right action rail. */
+export type StackDockSide = "left" | "right";
 /** "auto-wubrg" picks a random battlefield matching the dominant mana color.
  *  "random" picks a random battlefield each game regardless of color.
  *  "none" disables the background image.
@@ -119,6 +123,7 @@ function buildDefaultPreferences(): PreferencesState {
     spellPaymentMode: "auto",
     showKeywordStrip: true,
     battlefieldPeekOnHover: true,
+    stackDockSide: "right",
     aiSeats: [defaultAiSeat()],
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
@@ -171,6 +176,8 @@ interface PreferencesState {
    *  previewing that opponent's nonland permanents. Disable for a quieter
    *  HUD — focus is still reachable via tab click. */
   battlefieldPeekOnHover: boolean;
+  /** Screen edge the stack panel docks to and collapses toward. */
+  stackDockSide: StackDockSide;
   aiSeats: AiSeatPref[];
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
@@ -190,6 +197,7 @@ interface PreferencesActions {
   setCardSize: (size: CardSizePreference) => void;
   setHudLayout: (layout: HudLayout) => void;
   setFollowActiveOpponent: (enabled: boolean) => void;
+  setStackDockSide: (side: StackDockSide) => void;
   setLogDefaultState: (state: LogDefaultState) => void;
   setBoardBackground: (bg: BoardBackground) => void;
   setCustomBackgroundUrl: (url: string) => void;
@@ -284,6 +292,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setCardSize: (size) => set({ cardSize: size }),
       setHudLayout: (layout) => set({ hudLayout: layout }),
       setFollowActiveOpponent: (enabled) => set({ followActiveOpponent: enabled }),
+      setStackDockSide: (side) => set({ stackDockSide: side }),
       setLogDefaultState: (state) => set({ logDefaultState: state }),
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setCustomBackgroundUrl: (url) => set({ customBackgroundUrl: url.trim() }),
@@ -408,7 +417,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 9,
+      version: 10,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -425,6 +434,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v7 → v8: Add spellPaymentMode; legacy stores keep default auto.
       // v8 → v9: Add language; legacy/invalid values fall back to the
       //          browser-detected default so existing users keep their locale.
+      // v9 → v10: Add stackDockSide; legacy stores default to right (the prior
+      //          fixed behavior).
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -527,6 +538,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
                 ? lng
                 : detectInitialLanguage(),
           };
+        }
+
+        if (version < 10) {
+          migrated = { ...migrated, stackDockSide: "right" };
         }
 
         return migrated;
