@@ -154,7 +154,11 @@ interface MultiplayerDraftActions {
   /** Both: start the match for the current pairing. */
   startMatch: () => Promise<string | null>;
   /** Both: report a match result back to the pod host. */
-  reportMatchResult: (matchId: string, winnerSeat: number | null) => void;
+  reportMatchResult: (matchId: string, winnerSeat: number | null) => Promise<void>;
+  /** Both: report the active game result using the current draft match pairing. */
+  reportActiveMatchGameResult: (gameWinner: number | null) => Promise<void>;
+  /** Both: concede the active draft match and report the opponent as winner. */
+  reportActiveMatchConcession: () => Promise<void>;
   /** Host: advance to the next round (Casual mode). */
   advanceRound: () => void;
   /** Host: override a match result (Casual mode). */
@@ -174,6 +178,7 @@ interface MultiplayerDraftActions {
 let activeHostAdapter: DraftPodHostAdapter | null = null;
 let activeGuestAdapter: DraftPodGuestAdapter | null = null;
 let activeMatchController: GameLoopController | null = null;
+const reportedMatchResultIds = new Set<string>();
 const DRAFT_MATCH_FORMAT_CONFIG = FORMAT_DEFAULTS.Limited;
 
 const RARITY_SCORE: Record<string, number> = {
@@ -254,6 +259,12 @@ function winnerSeatForLaunch(launch: DraftMatchLaunch, gameWinner: number | null
 function guestWinnerSeatForLaunch(launch: DraftMatchLaunch, gameWinner: number | null): number | null {
   if (gameWinner === null) return null;
   return gameWinner === 0 ? opponentSeatForLaunch(launch) : launch.localSeat;
+}
+
+function winnerSeatForGameResult(launch: DraftMatchLaunch, gameWinner: number | null): number | null {
+  if (gameWinner === null) return null;
+  const localGamePlayerId = launch.type === "HumanGuest" ? 1 : 0;
+  return gameWinner === localGamePlayerId ? launch.localSeat : opponentSeatForLaunch(launch);
 }
 
 function disposeMatchController(): void {
@@ -633,7 +644,7 @@ export const useMultiplayerDraftStore = create<
             if (wf.type === "GameOver") {
               // Match is complete — report result to pod host
               const winnerSeat = winnerSeatForLaunch(matchPairing, wf.data.winner);
-              get().reportMatchResult(matchPairing.matchId, winnerSeat);
+              void get().reportMatchResult(matchPairing.matchId, winnerSeat);
             } else if (wf.type === "BetweenGamesSideboard") {
               // Between games in Bo3 — bridge to draft pod host for sideboard orchestration.
               const score = wf.data.score;
@@ -667,7 +678,7 @@ export const useMultiplayerDraftStore = create<
           if (event.type === "gameOver") {
             // Connection-level failure — report as match loss
             const winnerSeat = winnerSeatForLaunch(matchPairing, event.winner);
-            get().reportMatchResult(matchPairing.matchId, winnerSeat);
+            void get().reportMatchResult(matchPairing.matchId, winnerSeat);
           }
         });
 
@@ -706,7 +717,7 @@ export const useMultiplayerDraftStore = create<
             if (wf.type === "GameOver") {
               // Guest reports as backup (host's report is authoritative)
               const winnerSeat = guestWinnerSeatForLaunch(matchPairing, wf.data.winner);
-              get().reportMatchResult(matchPairing.matchId, winnerSeat);
+              void get().reportMatchResult(matchPairing.matchId, winnerSeat);
             }
             // BetweenGamesSideboard: guest receives sideboard prompt via draft pod channel
             // (handled by bo3SideboardPrompt event from P2PDraftGuest), not here.
@@ -714,7 +725,7 @@ export const useMultiplayerDraftStore = create<
           if (event.type === "gameOver") {
             // Connection failure — report as match loss
             const winnerSeat = guestWinnerSeatForLaunch(matchPairing, event.winner);
-            get().reportMatchResult(matchPairing.matchId, winnerSeat);
+            void get().reportMatchResult(matchPairing.matchId, winnerSeat);
           }
         });
 
@@ -746,11 +757,33 @@ export const useMultiplayerDraftStore = create<
 
   reportMatchResult: (matchId, winnerSeat) => {
     const { role } = get();
+    if (reportedMatchResultIds.has(matchId)) return Promise.resolve();
     if (role === "host" && activeHostAdapter) {
-      void activeHostAdapter.overrideMatchResult(matchId, winnerSeat);
+      reportedMatchResultIds.add(matchId);
+      return activeHostAdapter.overrideMatchResult(matchId, winnerSeat).catch((err) => {
+        reportedMatchResultIds.delete(matchId);
+        throw err;
+      });
     } else if (role === "guest" && activeGuestAdapter) {
+      reportedMatchResultIds.add(matchId);
       activeGuestAdapter.sendMatchResult(matchId, winnerSeat);
     }
+    return Promise.resolve();
+  },
+
+  reportActiveMatchGameResult: async (gameWinner) => {
+    const { matchPairing, reportMatchResult } = get();
+    if (!matchPairing) return;
+    await reportMatchResult(
+      matchPairing.matchId,
+      winnerSeatForGameResult(matchPairing, gameWinner),
+    );
+  },
+
+  reportActiveMatchConcession: async () => {
+    const { matchPairing, reportMatchResult } = get();
+    if (!matchPairing) return;
+    await reportMatchResult(matchPairing.matchId, opponentSeatForLaunch(matchPairing));
   },
 
   advanceRound: () => {
@@ -808,6 +841,7 @@ export const useMultiplayerDraftStore = create<
   leave: async (preserveSession = false) => {
     // Dispose match adapter first (game P2P connection)
     disposeMatchAdapter(set);
+    reportedMatchResultIds.clear();
 
     if (activeHostAdapter) {
       await activeHostAdapter.dispose({ preserveSession });
@@ -825,6 +859,7 @@ export const useMultiplayerDraftStore = create<
 
   reset: () => {
     disposeMatchAdapter(set);
+    reportedMatchResultIds.clear();
     set(initialState);
   },
 }));

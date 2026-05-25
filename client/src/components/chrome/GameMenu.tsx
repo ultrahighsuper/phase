@@ -5,8 +5,9 @@ import { useTranslation } from "react-i18next";
 import { ConnectionDot } from "../multiplayer/ConnectionDot.tsx";
 import { FullscreenButton } from "./FullscreenButton.tsx";
 import { VolumeControl } from "./VolumeControl.tsx";
-import { clearGame } from "../../stores/gameStore.ts";
+import { clearGame, useGameStore } from "../../stores/gameStore.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
+import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
 import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
 
 interface GameMenuProps {
@@ -153,7 +154,20 @@ export function GameMenu({
                   navigate("/draft/quick?resume=1");
                 });
               } else if (isDraftPodMatch) {
-                navigate("/draft-pod");
+                const adapter = useGameStore.getState().adapter as {
+                  sendConcede?: () => void | Promise<void>;
+                } | null;
+                void adapter?.sendConcede?.();
+                void useMultiplayerDraftStore
+                  .getState()
+                  .reportActiveMatchConcession()
+                  .then(() => {
+                    clearGame(gameId);
+                    navigate("/draft-pod");
+                  })
+                  .catch((err) => {
+                    console.error("[GameMenu] failed to report draft pod concession:", err);
+                  });
               } else {
                 clearGame(gameId);
                 navigate("/");

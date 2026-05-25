@@ -28,6 +28,7 @@ const mockHostAdapter = {
   kickPlayer: vi.fn(),
   requestPause: vi.fn(),
   requestResume: vi.fn(),
+  overrideMatchResult: vi.fn(async () => {}),
   dispose: vi.fn(async () => {}),
   status: "idle" as const,
   roomCode: null,
@@ -237,6 +238,70 @@ describe("multiplayerDraftStore", () => {
       expect(state.phase).toBe("matchInProgress");
       expect(state.playDrawPrompt).toBeNull();
       expect(state.sideboardSubmitted).toBe(false);
+    });
+
+    it("reports active bot match results back to the pod host", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        setPoolJson: "{}",
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+
+      useMultiplayerDraftStore.setState({
+        matchPairing: {
+          type: "Bot",
+          matchId: "match-1",
+          round: 1,
+          localSeat: 0,
+          botSeat: 4,
+          botName: "Chandra",
+          deckPayload: {
+            player: { main_deck: [], sideboard: [], commander: [] },
+            opponent: { main_deck: [], sideboard: [], commander: [] },
+            ai_decks: [],
+          },
+          matchConfig: { match_type: "Bo1" },
+        },
+      });
+
+      await useMultiplayerDraftStore.getState().reportActiveMatchGameResult(1);
+
+      expect(mockHostAdapter.overrideMatchResult).toHaveBeenCalledWith("match-1", 4);
+    });
+
+    it("reports active match concessions as opponent wins", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        setPoolJson: "{}",
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+
+      useMultiplayerDraftStore.setState({
+        matchPairing: {
+          type: "Bot",
+          matchId: "match-2",
+          round: 1,
+          localSeat: 0,
+          botSeat: 5,
+          botName: "Jace",
+          deckPayload: {
+            player: { main_deck: [], sideboard: [], commander: [] },
+            opponent: { main_deck: [], sideboard: [], commander: [] },
+            ai_decks: [],
+          },
+          matchConfig: { match_type: "Bo1" },
+        },
+      });
+
+      await useMultiplayerDraftStore.getState().reportActiveMatchConcession();
+
+      expect(mockHostAdapter.overrideMatchResult).toHaveBeenCalledWith("match-2", 5);
     });
   });
 

@@ -27,6 +27,7 @@ import {
   clearDraftHostSession,
   type PersistedDraftHostSession,
 } from "../services/draftPersistence";
+import { assignAvatarForSeat } from "../services/playerAvatars";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -427,6 +428,8 @@ export class P2PDraftHost {
   async startDraft(botFillEmptySeats = true): Promise<void> {
     if (this.draftStarted) return;
 
+    const seed = Math.floor(Math.random() * 0xffffffff);
+    const draftCode = `draft-${seed.toString(16).padStart(8, "0")}`;
     const seats: MultiplayerSeatDescriptor[] = [];
     for (let i = 0; i < this.podSize; i++) {
       const displayName = this.seatNames.get(i);
@@ -437,15 +440,13 @@ export class P2PDraftHost {
           display_name: displayName,
         });
       } else if (botFillEmptySeats) {
-        seats.push({ type: "Bot", name: this.botNameForSeat(i) });
+        seats.push({ type: "Bot", name: this.botNameForSeat(i, seed) });
       }
     }
     if (seats.length < 2) {
       throw new Error("Need at least two seats to start a pod draft");
     }
 
-    const seed = Math.floor(Math.random() * 0xffffffff);
-    const draftCode = `draft-${seed.toString(16).padStart(8, "0")}`;
     await this.adapter.createMultiplayerDraft(
       this.setPoolJson,
       seats,
@@ -782,8 +783,8 @@ export class P2PDraftHost {
     return this.seatNames.get(seat) === undefined && !this.guestSessions.has(seat);
   }
 
-  private botNameForSeat(seat: number): string {
-    return `AI player ${seat + 1}`;
+  private botNameForSeat(seat: number, seed: number): string {
+    return assignAvatarForSeat(this.podSize, seat, seed)?.name ?? `AI player ${seat + 1}`;
   }
 
   // ── Match coordination ────────────────────────────────────────────────
