@@ -1845,6 +1845,49 @@ pub(super) fn handle_resolution_choice(
                         }
                     }
                 }
+                EffectKind::Tap => {
+                    for &card_id in &chosen {
+                        match effects::tap_untap::process_one_tap(state, card_id, source_id, events)
+                        {
+                            Ok(effects::tap_untap::TapUntapOutcome::Complete) => {}
+                            Ok(effects::tap_untap::TapUntapOutcome::NeedsChoice(choice_player)) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                            Err(error) => {
+                                return Err(EngineError::InvalidAction(error.to_string()));
+                            }
+                        }
+                    }
+                }
+                EffectKind::Untap => {
+                    for &card_id in &chosen {
+                        match effects::tap_untap::process_one_untap(state, card_id, events) {
+                            Ok(effects::tap_untap::TapUntapOutcome::Complete) => {}
+                            Ok(effects::tap_untap::TapUntapOutcome::NeedsChoice(choice_player)) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                            Err(error) => {
+                                return Err(EngineError::InvalidAction(error.to_string()));
+                            }
+                        }
+                    }
+                }
                 // CR 115.1: Resolution-time selection for PutAtLibraryPosition
                 // from a private zone (e.g. Brainstorm's "put two cards from
                 // your hand on top of your library"). Cards are placed in
@@ -1906,6 +1949,8 @@ pub(super) fn handle_resolution_choice(
                 EffectKind::Sacrifice
                     | EffectKind::ChangeZone
                     | EffectKind::BounceAll
+                    | EffectKind::Tap
+                    | EffectKind::Untap
                     | EffectKind::PutAtLibraryPosition
             ) && state.pending_continuation.is_some()
             {

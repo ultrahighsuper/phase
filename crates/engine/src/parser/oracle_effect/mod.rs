@@ -13778,6 +13778,16 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
             return TargetChoiceTiming::Resolution;
         }
     }
+    if matches!(
+        clause_ir.parsed.effect,
+        Effect::Tap { .. } | Effect::Untap { .. }
+    ) && clause_ir.multi_target.is_some()
+    {
+        let lower = clause_ir.source_text.to_ascii_lowercase();
+        if !nom_primitives::scan_contains(&lower, "target ") {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
 
     let Effect::ChangeZone {
         origin: Some(origin),
@@ -25023,6 +25033,26 @@ mod tests {
                 effect.effect
             );
         }
+    }
+
+    #[test]
+    fn non_targeted_multi_untap_chooses_at_resolution() {
+        let def = parse_effect_chain(
+            "Draw two cards, then discard two cards. Untap up to three lands.",
+            AbilityKind::Spell,
+        );
+
+        let untap = def
+            .sub_ability
+            .as_ref()
+            .and_then(|discard| discard.sub_ability.as_ref())
+            .expect("Frantic Search should chain to an untap instruction");
+        assert!(matches!(&*untap.effect, Effect::Untap { .. }));
+        assert_eq!(untap.target_choice_timing, TargetChoiceTiming::Resolution);
+        assert_eq!(
+            untap.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 }))
+        );
     }
 
     /// CR 608.2c + CR 603.7a + CR 505.1 + CR 601.2h: Mana Sculpt end-to-end.

@@ -14657,6 +14657,63 @@ mod phase_trigger_regression_tests {
     }
 
     #[test]
+    fn effect_zone_choice_handler_resolves_untap_selection() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        let chosen_land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chosen Land".to_string(),
+            Zone::Battlefield,
+        );
+        let unchosen_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Unchosen Land".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [chosen_land, unchosen_land] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.tapped = true;
+        }
+
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![chosen_land, unchosen_land],
+            count: 2,
+            min_count: 0,
+            up_to: true,
+            source_id,
+            effect_kind: EffectKind::Untap,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            count_param: 0,
+        };
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![chosen_land],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(!state.objects[&chosen_land].tapped);
+        assert!(state.objects[&unchosen_land].tapped);
+        assert_eq!(state.last_effect_count, Some(1));
+    }
+
+    #[test]
     fn effect_zone_choice_up_to_respects_min_count() {
         let mut state = setup_game_at_main_phase();
         let source_id = ObjectId(100);
