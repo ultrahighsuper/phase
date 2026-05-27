@@ -11560,11 +11560,11 @@ pub(crate) fn parse_effect_chain_ir(
             // effect to pass to try_parse_dig_instead_alternative (which inspects the
             // previous effect to check it's a Dig). Must skip absorbed clauses — in the
             // old code, absorbed chunks are not in `defs`, so `defs.last()` is the Dig.
-            let prev_temp = clauses
-                .iter()
-                .rev()
-                .find(|c| !c.absorbed_by_followup)
-                .map(|c| AbilityDefinition::new(kind, c.parsed.effect.clone()));
+            let prev_clause = clauses.iter().rev().find(|c| !c.absorbed_by_followup);
+            let prev_temp =
+                prev_clause.map(|c| AbilityDefinition::new(kind, c.parsed.effect.clone()));
+            let inherited_where_x_expression =
+                prev_clause.and_then(|c| c.where_x_expression.clone());
             if let Some(alt_def) =
                 try_parse_dig_instead_alternative(normalized_text, prev_temp.as_ref(), kind, ctx)
             {
@@ -11588,7 +11588,7 @@ pub(crate) fn parse_effect_chain_ir(
                         followup_continuation: None,
                         absorbed_by_followup: false,
                         multi_target: None,
-                        where_x_expression: None,
+                        where_x_expression: inherited_where_x_expression,
                         is_otherwise: false,
                         unless_pay: None,
                         special: Some(SpecialClause::DigInsteadAlt(Box::new(alt_def))),
@@ -13144,6 +13144,10 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                     SpecialClause::DigInsteadAlt(alt_def) => {
                         if let Some(last_def) = defs.pop() {
                             let mut new_def = *alt_def.clone();
+                            apply_where_x_ability_expression(
+                                &mut new_def,
+                                clause_ir.where_x_expression.as_deref(),
+                            );
                             new_def.else_ability = Some(Box::new(last_def));
                             defs.push(new_def);
                         }
@@ -18601,6 +18605,61 @@ mod tests {
         };
         assert_eq!(*base_keep_count, Some(1));
         assert!(!*base_up_to);
+        assert_eq!(*base_rest_destination, Some(Zone::Library));
+    }
+
+    #[test]
+    fn consult_the_star_charts_kicked_branch_keeps_two_of_those_cards() {
+        let def = parse_effect_chain(
+            "Look at the top X cards of your library, where X is the number of lands you control. Put one of those cards into your hand. If this spell was kicked, put two of those cards into your hand instead. Put the rest on the bottom of your library in a random order.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::Dig {
+            count,
+            keep_count,
+            up_to,
+            filter,
+            destination,
+            rest_destination,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected kicked Consult Dig branch, got {:?}", def.effect);
+        };
+        assert!(matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            }
+        ));
+        assert_eq!(*keep_count, Some(2));
+        assert!(!*up_to);
+        assert_eq!(*filter, TargetFilter::Any);
+        assert_eq!(*destination, Some(Zone::Hand));
+        assert_eq!(*rest_destination, Some(Zone::Library));
+        assert_eq!(
+            def.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        );
+
+        let base = def
+            .else_ability
+            .as_deref()
+            .expect("base Consult Dig must be stored as else_ability");
+        let Effect::Dig {
+            keep_count: base_keep_count,
+            up_to: base_up_to,
+            destination: base_destination,
+            rest_destination: base_rest_destination,
+            ..
+        } = &*base.effect
+        else {
+            panic!("expected base Consult Dig, got {:?}", base.effect);
+        };
+        assert_eq!(*base_keep_count, Some(1));
+        assert!(!*base_up_to);
+        assert_eq!(*base_destination, Some(Zone::Hand));
         assert_eq!(*base_rest_destination, Some(Zone::Library));
     }
 

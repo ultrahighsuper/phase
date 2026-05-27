@@ -2123,6 +2123,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
 /// - "return a permanent card from among them to your hand"
 /// - "you may reveal a creature card from among them and put it into your hand"
 /// - "put two of them into your hand and the rest on the bottom of your library in any order"
+/// - "put two of those cards into your hand"
 pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<ContinuationAst> {
     // CR 202.3 + CR 107.3i: Strip a trailing "where X is <expression>" defining
     // clause before destination/count/filter parsing. `where_x_expression`
@@ -2166,7 +2167,13 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
 
     // "put N of them into your hand [and the rest on the bottom]" — no filter, count explicit.
     // Must be checked BEFORE the "from among" path since "of them" appears in both forms.
-    if let Ok((_, before_of)) = take_until::<_, _, OracleError<'_>>(" of them").parse(lower) {
+    if let Ok((_, before_of)) = alt((
+        take_until::<_, _, OracleError<'_>>(" of those cards"),
+        take_until(" of those"),
+        take_until(" of them"),
+    ))
+    .parse(lower)
+    {
         let before_of = before_of.trim();
         let after_put = alt((tag::<_, _, OracleError<'_>>("you may put "), tag("put ")))
             .parse(before_of)
@@ -3011,7 +3018,9 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "from among those cards")
                 || nom_primitives::scan_contains(&lower, "from among the milled cards")
                 || nom_primitives::scan_contains(&lower, "milled this way")
-                || nom_primitives::scan_contains(&lower, "of them"))
+                || nom_primitives::scan_contains(&lower, "of them")
+                || nom_primitives::scan_contains(&lower, "of those cards")
+                || nom_primitives::scan_contains(&lower, "of those"))
                 && (nom_primitives::scan_contains(&lower, "onto the battlefield")
                     || nom_primitives::scan_contains(&lower, "into your hand")
                     || nom_primitives::scan_contains(&lower, "into their hand")
