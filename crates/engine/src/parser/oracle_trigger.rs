@@ -3962,6 +3962,8 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_phrase("becomes the target of a spell or ability"),
         parse_event_phrase("become the target of a spell or ability"),
         parse_event_phrase("becomes the target of an aura spell"),
+        parse_event_phrase("becomes the target of an instant or sorcery spell"),
+        parse_event_phrase("become the target of an instant or sorcery spell"),
         parse_event_phrase("becomes the target of a spell"),
         // CR 702.26c: "phases in" / "phase in" — phasing trigger verb.
         parse_event_phrase("phases in"),
@@ -5662,6 +5664,21 @@ fn try_parse_event(
                     )),
                 },
                 tag("becomes the target of an aura spell"),
+            ),
+            // CR 115.1a: "instant or sorcery spell" source restriction.
+            value(
+                SimpleEvent::BecomesTargetSpell {
+                    qualifier: Some(TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                        ],
+                    }),
+                },
+                alt((
+                    tag("becomes the target of an instant or sorcery spell"),
+                    tag("become the target of an instant or sorcery spell"),
+                )),
             ),
             value(
                 SimpleEvent::BecomesTargetSpell { qualifier: None },
@@ -16656,6 +16673,65 @@ mod tests {
                 filters: vec![
                     TargetFilter::StackSpell,
                     TargetFilter::Typed(TypedFilter::default().subtype("Aura".to_string())),
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn trigger_becomes_target_of_instant_or_sorcery_spell() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control becomes the target of an instant or sorcery spell, that creature gets +3/+3 until end of turn.",
+            "Wild Defiance",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+            ))
+        );
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                        ],
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn trigger_batched_become_target_of_instant_or_sorcery_spell() {
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control become the target of an instant or sorcery spell, draw a card.",
+            "Hypothetical Wild Defiance Payoff",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert!(def.batched);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+            ))
+        );
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                        ],
+                    },
                 ],
             })
         );
