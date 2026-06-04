@@ -7330,6 +7330,81 @@ fn each_land_is_a_swamp_in_addition_urborg() {
 }
 
 #[test]
+fn all_lands_are_creatures_living_plane() {
+    use crate::types::card_type::CoreType;
+
+    // CR 613.1d + CR 613.4b + CR 205.1b: Living Plane / Nature's Revolt —
+    // a continuous static animating every land into a creature while it stays
+    // a land. P/T is set (Layer 7b), the creature type is added (Layer 4), and
+    // the land type is retained (additive types, confirmed by "that are still
+    // lands").
+    let def = parse_static_line("All lands are 1/1 creatures that are still lands.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddType { core_type } if *core_type == CoreType::Creature
+        )),
+        "must add the Creature type (Layer 4): {mods:?}"
+    );
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::SetPower { value } if *value == 1)),
+        "must set power to 1 (Layer 7b): {mods:?}"
+    );
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::SetToughness { value } if *value == 1)),
+        "must set toughness to 1 (Layer 7b): {mods:?}"
+    );
+    // No SetBasicLandType / type replacement — the land keeps its land type.
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetBasicLandType { .. }
+                | ContinuousModification::SetCardTypes { .. }
+        )),
+        "must not replace types (CR 205.1b retention): {mods:?}"
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Land));
+            assert!(tf.controller.is_none(), "all lands — no controller scope");
+        }
+        _ => panic!("Expected Typed land filter (all lands)"),
+    }
+}
+
+#[test]
+fn lands_you_control_are_creatures_scope_and_pt() {
+    use crate::types::card_type::CoreType;
+
+    // Same building block, controller-scoped subject + a different P/T proves
+    // the animation spec (not a hardcoded 1/1) drives the result.
+    let def =
+        parse_static_line("Lands you control are 2/2 creatures that are still lands.").unwrap();
+    let mods = &def.modifications;
+    assert!(mods.iter().any(|m| matches!(
+        m,
+        ContinuousModification::AddType { core_type } if *core_type == CoreType::Creature
+    )));
+    assert!(mods
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::SetPower { value } if *value == 2)));
+    assert!(mods
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::SetToughness { value } if *value == 2)));
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Land));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+        _ => panic!("Expected Typed land filter scoped to you"),
+    }
+}
+
+#[test]
 fn all_lands_are_islands_in_addition_stormtide() {
     let def = parse_static_line("All lands are Islands in addition to their other types.").unwrap();
     assert_eq!(

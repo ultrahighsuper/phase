@@ -709,6 +709,15 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // CR 613.1d + CR 613.4b: "[Subject] lands are [P/T] creatures that are still
+    // lands" — continuous land animation (Living Plane, Nature's Revolt). Must
+    // come before parse_land_type_change: both split on "are", but the land
+    // animation form carries a creature descriptor the type-change parser can't
+    // claim. The "creature" guard lets land *type* lines fall through.
+    if let Some(def) = parse_land_animation(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 305.7: "[Subject] lands are [type]" — land type-changing statics.
     // Must come before parse_subject_continuous_static (which splits on "gets/has/gains"
     // verbs and would not match "are" predicates).
