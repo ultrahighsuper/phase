@@ -911,13 +911,9 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     def.unless_pay = modifiers.unless_pay.clone();
 
     // CR 603.4: Compose intervening-if with existing condition via And.
-    def.condition = match (&modifiers.intervening_if, def.condition.take()) {
-        (Some(if_cond), Some(existing)) => Some(TriggerCondition::And {
-            conditions: vec![existing, if_cond.clone()],
-        }),
-        (Some(c), None) => Some(c.clone()),
-        (None, Some(c)) => Some(c),
-        (None, None) => None,
+    def.condition = match modifiers.intervening_if.clone() {
+        Some(if_cond) => Some(and_trigger_conditions(def.condition.take(), if_cond)),
+        None => def.condition.take(),
     };
 
     // CR 603.4: Intervening-if life-gain triggers check the gained-life
@@ -4507,10 +4503,93 @@ fn make_base() -> TriggerDefinition {
         .trigger_zones(vec![Zone::Battlefield])
 }
 
+/// CR 603.4: AND-compose a newly extracted trigger condition onto any existing
+/// one. When the trigger already carries a condition (e.g. a parsed
+/// intervening-`if`), both must hold, so they are combined under
+/// `TriggerCondition::And`; otherwise the new condition stands alone. Shared by
+/// the intervening-`if` composition and the `"while ~ is attacking"` state-gate
+/// composition so both sites compose conditions identically.
+fn and_trigger_conditions(
+    existing: Option<TriggerCondition>,
+    new: TriggerCondition,
+) -> TriggerCondition {
+    match existing {
+        Some(existing) => TriggerCondition::And {
+            conditions: vec![existing, new],
+        },
+        None => new,
+    }
+}
+
+/// CR 603.4 + CR 508.1: Strip a trailing `"while [self-ref] is [combat
+/// state]"` gate from a trigger-event clause and convert it to a
+/// `TriggerCondition`.
+///
+/// A `"while ..."` clause appended to the trigger event ("Whenever you cast a
+/// spell **while ~ is attacking**, ...") is a state gate that mirrors the
+/// intervening-`if` rule: the trigger only fires while the source is in that
+/// combat state, and the state is rechecked on resolution. Fire Lord Azula's
+/// copy trigger is the motivating card; the clause generalizes to any
+/// `"[event] while [self-ref] is attacking/blocking/blocked"` trigger, so it is
+/// stripped here — before mode dispatch — and the remaining event clause is
+/// parsed unchanged.
+///
+/// Delegates condition recognition to `parse_inner_condition` (the shared
+/// combinator authority, which already handles `"~ is attacking"` via
+/// `parse_combat_state_predicate`). Only the attacking gate is representable as
+/// a `TriggerCondition` (`SourceIsAttacking` is the sole combat-state variant of
+/// that enum — CR 508.1), so a recognized-but-unrepresentable state ("while ~ is
+/// blocking") returns `None`, leaving the clause intact rather than dropping the
+/// gate silently. Returns the event clause with the `"while ..."` suffix removed
+/// plus the extracted condition, or `None` when no representable `"while ..."`
+/// gate is present.
+fn strip_while_state_clause(condition: &str) -> Option<(String, TriggerCondition)> {
+    let lower = condition.to_lowercase();
+    // The gate is introduced by " while " and runs to the end of the event
+    // clause (the effect was already split off at the first ", " boundary).
+    // `take_until` consumes the pre-`while` prefix and `tag(" while ")` discards
+    // the delimiter, leaving the gate fragment as the remainder. The prefix
+    // length is the byte boundary used to slice the original-case `condition`
+    // for the returned event clause.
+    let (fragment, before) = terminated(
+        take_until(" while "),
+        tag::<_, _, OracleError<'_>>(" while "),
+    )
+    .parse(lower.as_str())
+    .ok()?;
+    let pos = before.len();
+    let (rest, sc) = parse_inner_condition(fragment.trim()).ok()?;
+    // CR 603.4: only accept when the whole "while ..." tail is the condition —
+    // a dangling remainder means this isn't a clean state gate.
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    // CR 508.1 / CR 603.4: "while ~ is attacking" is the only combat-state gate
+    // with a `TriggerCondition` representation. The general
+    // `static_condition_to_trigger_condition` bridge deliberately leaves combat
+    // states unmapped, so match the attacking state directly here.
+    let cond = match sc {
+        StaticCondition::SourceIsAttacking => TriggerCondition::SourceIsAttacking,
+        _ => return None,
+    };
+    Some((condition[..pos].trim_end().to_string(), cond))
+}
+
 pub(crate) fn parse_trigger_condition(
     condition: &str,
     ctx: &mut ParseContext,
 ) -> (TriggerMode, TriggerDefinition) {
+    // CR 603.4 + CR 508.1: A trailing "while [self-ref] is attacking" gate on
+    // the trigger event ("Whenever you cast a spell while ~ is attacking")
+    // restricts the trigger to that combat state. Strip it before mode dispatch
+    // and AND it onto the parsed trigger's condition so the rest of the event
+    // clause parses exactly as it would unqualified.
+    if let Some((stripped, while_cond)) = strip_while_state_clause(condition) {
+        let (mode, mut def) = parse_trigger_condition(&stripped, ctx);
+        def.condition = Some(and_trigger_conditions(def.condition.take(), while_cond));
+        return (mode, def);
+    }
+
     // CR 603.4: Reset any stale relative-clause state before parsing this
     // trigger line. Every early-return path below (phase/player/counter
     // triggers, disjunctive zone-change, the `Unknown` fallback) and the
@@ -21105,6 +21184,60 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::SpellCopy);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
         assert!(def.execute.is_some());
+    }
+
+    /// CR 603.4 + CR 508.1 (issue #1487, Fire Lord Azula): a `"while ~ is
+    /// attacking"` gate appended to a cast-trigger event restricts the trigger
+    /// to combat. Before the fix the clause was dropped, so the copy fired on
+    /// every spell the controller cast (regardless of whether the source was
+    /// attacking). The gate must surface as a `SourceIsAttacking` condition.
+    #[test]
+    fn trigger_cast_spell_while_attacking_gates_on_combat() {
+        let def = parse_trigger_line(
+            "Whenever you cast a spell while Fire Lord Azula is attacking, copy that spell. \
+             You may choose new targets for the copy.",
+            "Fire Lord Azula",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::SourceIsAttacking),
+            "the `while ~ is attacking` gate must become a SourceIsAttacking condition"
+        );
+        // The remaining event clause still parses to the copy effect.
+        assert!(matches!(
+            def.execute.as_deref().map(|a| a.effect.as_ref()),
+            Some(crate::types::ability::Effect::CopySpell { .. })
+        ));
+    }
+
+    /// CR 603.4 + CR 508.1: the `"while ~ is attacking"` gate composes with an
+    /// existing intervening-if rather than overwriting it — the trigger fires
+    /// only when both predicates hold.
+    #[test]
+    fn trigger_while_attacking_composes_with_existing_condition() {
+        let def = parse_trigger_line(
+            "Whenever you cast a creature spell while ~ is attacking, if you control three or more creatures, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        // The `while` gate and the intervening-if are AND-composed.
+        match def.condition {
+            Some(TriggerCondition::And { conditions }) => {
+                assert!(
+                    conditions.contains(&TriggerCondition::SourceIsAttacking),
+                    "expected SourceIsAttacking among AND conditions, got {conditions:?}"
+                );
+                assert!(
+                    conditions
+                        .iter()
+                        .any(|c| !matches!(c, TriggerCondition::SourceIsAttacking)),
+                    "expected the intervening-if to also be present, got {conditions:?}"
+                );
+            }
+            other => panic!("expected And(SourceIsAttacking, <if>), got {other:?}"),
+        }
     }
 
     // --- Plan 03: DamageDone trigger sub-patterns ---
