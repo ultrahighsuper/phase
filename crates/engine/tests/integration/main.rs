@@ -86,6 +86,7 @@ mod invoke_calamity_free_cast;
 mod issue_1308_unstoppable_plan;
 mod issue_1509_sorcery_main_phase_cast;
 mod issue_1963_lotleth_troll;
+mod issue_1969_combat_damage_auto_pass;
 mod issue_1970_eladamri;
 mod issue_1971_enduring_tenacity;
 mod issue_1973_rise_of_dark_realms;
