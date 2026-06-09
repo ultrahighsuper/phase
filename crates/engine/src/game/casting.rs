@@ -1415,6 +1415,19 @@ fn has_graveyard_timed_alt_cost_permission(
         })
 }
 
+/// CR 601.2a: Object-level alt-cost grants that allow casting a chosen card
+/// from hand without moving it first (Electrodominance).
+fn has_hand_alt_cost_permission(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+) -> bool {
+    obj.zone == Zone::Hand
+        && obj.casting_permissions.iter().any(|permission| {
+            exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+        })
+}
+
 /// CR 608.2g: An object carries a *cast-during-resolution* alt-cost permission —
 /// the runtime `ExileWithAltCost` stamped by `initiate_cast_during_resolution`,
 /// identified by `resolution_cleanup.is_some()`. Unlike Cascade/Discover/Suspend
@@ -2760,6 +2773,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     };
     let has_graveyard_permission = graveyard_permission_src.is_some();
     let has_graveyard_alt_cost = has_graveyard_timed_alt_cost_permission(state, obj, player);
+    let has_hand_alt_cost = has_hand_alt_cost_permission(state, obj, player);
     // CR 608.2g: A free-cast window (Invoke Calamity) may drive a
     // cast-during-resolution on a card still in the controller's HAND. The
     // runtime `ExileWithAltCost { resolution_cleanup: Some(_) }` is the
@@ -2876,12 +2890,13 @@ fn prepare_spell_cast_with_variant_override_inner(
 
     let flash_cost = restrictions::flash_timing_cost(state, player, obj);
     // ExileWithAltCost / ExileWithAltAbilityCost: override mana cost when
-    // casting from exile via an alt-cost permission. The non-mana branch
+    // casting via an object-level alt-cost permission. The non-mana branch
     // (ExileWithAltAbilityCost) zeroes the mana cost — its `AbilityCost` is
     // routed through `pay_additional_cost` in `check_additional_cost_or_pay`
     // (CR 118.9 + CR 119.4).
     let alt_cost_from_exile = if obj.zone == Zone::Exile
         || has_graveyard_alt_cost
+        || has_hand_alt_cost
         || has_during_resolution_alt_cost
     {
         // CR 611.2a: When a permission carries `granted_to: Some(p)`, only
@@ -23137,6 +23152,44 @@ mod tests {
         assert!(spell_objects_available_to_cast(&state, PlayerId(0)).contains(&bauble));
         prepare_spell_cast(&state, PlayerId(0), bauble)
             .expect("bauble must be castable from graveyard");
+    }
+
+    #[test]
+    fn hand_alt_cost_permission_overrides_printed_mana_cost() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_object(
+            &mut state,
+            CardId(1313),
+            PlayerId(0),
+            "Hand Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            obj.mana_cost = ManaCost::generic(5);
+            obj.casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: None,
+                    duration: None,
+                });
+        }
+
+        let prepared = prepare_spell_cast(&state, PlayerId(0), spell)
+            .expect("hand CastFromZone permission must allow the spell to be prepared");
+
+        assert!(prepared.mana_cost.is_without_paying_mana());
     }
 
     fn add_borrowed_exile_sorcery_with_mana_value(
