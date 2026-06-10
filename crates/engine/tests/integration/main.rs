@@ -137,6 +137,7 @@ mod issue_580_solitude_evoke_prompt;
 mod issue_583_vivi_ornitier_mana_source;
 mod issue_709_regression;
 mod issue_860_luminarch_aspirant;
+mod issue_868_szarekh_attack_trigger;
 mod issue_879_obsessive_pursuit;
 mod issue_924_offspring;
 mod issue_927_tireless_provisioner;
