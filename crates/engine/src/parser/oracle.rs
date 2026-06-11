@@ -4861,8 +4861,9 @@ mod tests {
         Duration, Effect, EffectScope, FilterProp, ManaProduction, ManaSpendRestriction,
         ModalSelectionConstraint, MultiTargetSpec, ObjectScope, ParsedCondition, PlayerFilter,
         PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-        ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation, ShieldKind,
-        StaticCondition, TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+        ReplacementCondition, RoundingMode, SacrificeCost, SacrificeRequirement, SharedQuality,
+        SharedQualityRelation, ShieldKind, StaticCondition, TapStateChange, TargetFilter,
+        TriggerCondition, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -5629,7 +5630,9 @@ mod tests {
             } => {
                 assert!(repeatability.is_once());
                 assert_eq!(costs.len(), 1);
-                assert!(matches!(&costs[0], AbilityCost::Sacrifice { count: 1, .. }));
+                assert!(
+                    matches!(&costs[0], AbilityCost::Sacrifice(ref c) if c.requirement.fixed_count() == Some(1))
+                );
             }
             other => panic!("expected non-mana Kicker, got {other:?}"),
         }
@@ -5645,12 +5648,9 @@ mod tests {
         let r = parse(oracle, "Rottenmouth Viper", &[], &["Creature"], &[]);
         match r.additional_cost {
             Some(AdditionalCost::Optional {
-                cost:
-                    AbilityCost::Sacrifice {
-                        count: u32::MAX, ..
-                    },
+                cost: AbilityCost::Sacrifice(ref sac),
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-            }) => {}
+            }) if sac.requirement.fixed_count() == Some(u32::MAX) => {}
             other => panic!("expected optional any-number sacrifice, got {other:?}"),
         }
         assert!(
@@ -5683,10 +5683,10 @@ mod tests {
         );
 
         match r.additional_cost.expect("additional cost") {
-            AdditionalCost::Required(AbilityCost::Sacrifice { target, count }) => {
-                assert_eq!(count, 1);
+            AdditionalCost::Required(AbilityCost::Sacrifice(ref sac)) => {
+                assert_eq!(sac.requirement.fixed_count(), Some(1));
                 assert_eq!(
-                    target,
+                    sac.target,
                     TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))
                 );
             }
@@ -5710,9 +5710,9 @@ mod tests {
             &[],
         );
         match r.additional_cost.expect("additional cost") {
-            AdditionalCost::Required(AbilityCost::Sacrifice { target, count }) => {
-                assert_eq!(count, 1);
-                assert_eq!(target, TargetFilter::Typed(TypedFilter::creature()));
+            AdditionalCost::Required(AbilityCost::Sacrifice(ref sac)) => {
+                assert_eq!(sac.requirement.fixed_count(), Some(1));
+                assert_eq!(sac.target, TargetFilter::Typed(TypedFilter::creature()));
             }
             other => panic!("expected required sacrifice-creature cost, got {other:?}"),
         }
@@ -5847,10 +5847,9 @@ mod tests {
 
         assert_eq!(
             r.additional_cost,
-            Some(AdditionalCost::Required(AbilityCost::Sacrifice {
-                target: TargetFilter::Typed(TypedFilter::creature()),
-                count: u32::MAX,
-            }))
+            Some(AdditionalCost::Required(AbilityCost::Sacrifice(
+                SacrificeCost::count(TargetFilter::Typed(TypedFilter::creature()), u32::MAX)
+            )))
         );
         assert_eq!(r.abilities.len(), 1);
         let x = QuantityExpr::Ref {
@@ -6811,10 +6810,8 @@ mod tests {
                                 if matches!(*definition.effect, Effect::Mana { .. })
                                     && matches!(
                                         definition.cost,
-                                        Some(AbilityCost::Sacrifice {
-                                            target: TargetFilter::SelfRef,
-                                            count: 1
-                                        })
+                                        Some(AbilityCost::Sacrifice(ref sac))
+                                            if sac.requirement.fixed_count() == Some(1)
                                     )
                         )
                     })
@@ -6903,13 +6900,14 @@ mod tests {
                                 modification,
                                 ContinuousModification::GrantAbility { definition }
                                     if matches!(*definition.effect, Effect::Mana { .. })
-                                        && matches!(
-                                            definition.cost,
-                                            Some(AbilityCost::Sacrifice {
-                                                target: TargetFilter::SelfRef,
-                                                count: 1
-                                            })
-                                        )
+                                        && {
+                if let Some(AbilityCost::Sacrifice(sc)) = &definition.cost {
+                    matches!(sc.target, TargetFilter::SelfRef)
+                        && sc.requirement == SacrificeRequirement::count(1)
+                } else {
+                    false
+                }
+            }
                             )
                         })
                     }),
@@ -11608,7 +11606,7 @@ mod tests {
         let ability = &r.abilities[0];
         assert_eq!(ability.kind, AbilityKind::Activated);
         assert!(
-            matches!(ability.cost, Some(AbilityCost::Sacrifice { .. })),
+            matches!(ability.cost, Some(AbilityCost::Sacrifice(_))),
             "Boast cost should be Sacrifice, got {:?}",
             ability.cost
         );
@@ -12136,12 +12134,13 @@ mod tests {
             .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
         assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
         match cu_kw.unwrap() {
-            Keyword::CumulativeUpkeep(AbilityCost::Sacrifice { target, count }) => {
-                assert_eq!(*count, 1);
+            Keyword::CumulativeUpkeep(AbilityCost::Sacrifice(ref sac)) => {
+                assert_eq!(sac.requirement.fixed_count(), Some(1));
                 // Target should be a typed filter (Land subtype filter).
                 assert!(
-                    matches!(target, TargetFilter::Typed(_)),
-                    "expected Typed Land filter, got {target:?}"
+                    matches!(&sac.target, TargetFilter::Typed(_)),
+                    "expected Typed Land filter, got {:?}",
+                    sac.target
                 );
             }
             other => panic!("expected Sacrifice(Land, 1), got {other:?}"),

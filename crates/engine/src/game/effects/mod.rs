@@ -10,8 +10,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CopyRetargetPermission,
     CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, EffectScope,
     FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
-    ResolvedAbility, SharedQuality, SharedQualityRelation, SubAbilityLink, TapStateChange,
-    TargetFilter, TargetRef,
+    ResolvedAbility, SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation,
+    SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -5766,10 +5766,18 @@ fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
         AbilityCost::PayLife { amount } => AbilityCost::PayLife {
             amount: amount.scaled_by(n),
         },
-        AbilityCost::Sacrifice { target, count } => AbilityCost::Sacrifice {
-            target: target.clone(),
-            count: count.saturating_mul(n),
-        },
+        AbilityCost::Sacrifice(cost) => {
+            let requirement = match &cost.requirement {
+                SacrificeRequirement::Count { count } => {
+                    SacrificeRequirement::count(count.saturating_mul(n))
+                }
+                req => req.clone(),
+            };
+            AbilityCost::Sacrifice(SacrificeCost {
+                target: cost.target.clone(),
+                requirement,
+            })
+        }
         AbilityCost::OneOf { costs } => AbilityCost::Composite {
             costs: vec![
                 AbilityCost::OneOf {
@@ -6968,15 +6976,12 @@ mod tests {
 
     #[test]
     fn expand_per_counter_sacrifice_multiplies_count() {
-        let base = AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            count: 1,
-        };
+        let base = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
         let expanded = expand_per_counter(&base, 3);
-        let AbilityCost::Sacrifice { count, .. } = expanded else {
+        let AbilityCost::Sacrifice(cost) = expanded else {
             panic!("expected Sacrifice");
         };
-        assert_eq!(count, 3);
+        assert_eq!(cost.requirement.fixed_count(), Some(3));
     }
 
     #[test]

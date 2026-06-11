@@ -674,7 +674,7 @@ fn parse_self_enters_pay_cost_replacement(
     // Guard: only Sacrifice / Discard are valid Karoo accept-costs.
     if !matches!(
         cost,
-        AbilityCost::Sacrifice { .. } | AbilityCost::Discard { .. }
+        AbilityCost::Sacrifice(_) | AbilityCost::Discard { .. }
     ) {
         return None;
     }
@@ -6156,7 +6156,7 @@ mod tests {
         match &def.mode {
             ReplacementMode::MayCost { cost, decline } => {
                 assert!(
-                    matches!(cost, AbilityCost::Sacrifice { count: 2, .. }),
+                    matches!(cost, AbilityCost::Sacrifice(ref c) if c.requirement.fixed_count() == Some(2)),
                     "expected Sacrifice count 2, got {cost:?}"
                 );
                 let decline = decline.as_ref().expect("Karoo decline branch");
@@ -6185,7 +6185,7 @@ mod tests {
         match &def.mode {
             ReplacementMode::MayCost { cost, .. } => {
                 assert!(
-                    matches!(cost, AbilityCost::Sacrifice { count: 1, .. }),
+                    matches!(cost, AbilityCost::Sacrifice(ref c) if c.requirement.fixed_count() == Some(1)),
                     "expected Sacrifice count 1, got {cost:?}"
                 );
             }

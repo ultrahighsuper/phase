@@ -16,7 +16,7 @@ use super::oracle_target::parse_type_phrase;
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
     AbilityCost, AdditionalCost, ControllerRef, CostObjectCount, Effect, EffectScope, FilterProp,
-    QuantityExpr, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+    QuantityExpr, SacrificeRequirement, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, EmbalmCost,
@@ -1723,12 +1723,19 @@ fn format_cumulative_upkeep_cost(cost: &AbilityCost) -> String {
             QuantityExpr::Fixed { value } => format!("Pay {value} life"),
             other => format!("Pay {other:?} life"),
         },
-        AbilityCost::Sacrifice { target, count } => {
-            let subject = format_sacrifice_subject(target);
-            if *count == 1 {
-                format!("Sacrifice a {subject}")
-            } else {
-                format!("Sacrifice {count} {subject}s")
+        AbilityCost::Sacrifice(cost) => {
+            let subject = format_sacrifice_subject(&cost.target);
+            match &cost.requirement {
+                SacrificeRequirement::Count { count } => {
+                    if *count == 1 {
+                        format!("Sacrifice a {subject}")
+                    } else {
+                        format!("Sacrifice {count} {subject}s")
+                    }
+                }
+                SacrificeRequirement::Aggregate { value, .. } => {
+                    format!("Sacrifice {subject} with total power {value} or greater")
+                }
             }
         }
         AbilityCost::OneOf { costs } => costs
@@ -1971,7 +1978,7 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::AbilityCost;
+    use crate::types::ability::{AbilityCost, SacrificeCost};
     use crate::types::mana::ManaCost;
 
     #[test]
@@ -3691,10 +3698,10 @@ mod tests {
         // CR 702.24a: Sacrifice cumulative upkeep renders the subject from
         // the typed filter ("Sacrifice a land" for Polar Kraken).
         use crate::types::ability::{TypeFilter, TypedFilter};
-        let kw = Keyword::CumulativeUpkeep(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
-            count: 1,
-        });
+        let kw = Keyword::CumulativeUpkeep(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+            1,
+        )));
         let s = keyword_display_name(&kw);
         // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
         assert!(s.contains("cumulative upkeep"), "{s}");

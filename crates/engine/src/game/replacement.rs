@@ -392,13 +392,22 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         AbilityCost::Mana { cost } => format!("Pay {cost:?}"),
         AbilityCost::PayLife { amount } => format!("Pay {amount:?} life"),
         // CR 614.12a: Karoo self-ETB cost lands.
-        AbilityCost::Sacrifice { count, .. } => {
-            if *count == 1 {
-                "Sacrifice a permanent".to_string()
-            } else {
-                format!("Sacrifice {count} permanents")
+        AbilityCost::Sacrifice(cost) => match &cost.requirement {
+            crate::types::ability::SacrificeRequirement::Count { count } => {
+                if *count == 1 {
+                    "Sacrifice a permanent".to_string()
+                } else {
+                    format!("Sacrifice {count} permanents")
+                }
             }
-        }
+            crate::types::ability::SacrificeRequirement::Aggregate {
+                stat: crate::types::ability::SacrificeAggregateStat::TotalPower,
+                comparator,
+                value,
+            } => {
+                format!("Sacrifice creatures with total power {value} ({comparator:?} constraint)")
+            }
+        },
         AbilityCost::Discard { .. } => "Discard a card".to_string(),
         // CR 702.24a: Delegate the label to the base cost so a "for each
         // counter" wrapper inherits its base's prompt phrasing (e.g.,

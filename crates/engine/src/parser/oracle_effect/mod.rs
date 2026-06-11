@@ -20821,7 +20821,7 @@ mod tests {
             panic!("expected Destroy, got {:?}", def.effect);
         };
         let TargetFilter::Typed(tf) = target else {
-            panic!("expected typed creature target, got {target:?}");
+            panic!("expected typed creature target, got {0:?}", target);
         };
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
         assert!(
@@ -21001,7 +21001,7 @@ mod tests {
             panic!("expected Bounce to hand, got {e:?}");
         };
         let TargetFilter::Or { filters } = target else {
-            panic!("expected Or target filter, got {target:?}");
+            panic!("expected Or target filter, got {0:?}", target);
         };
         assert!(filters
             .iter()
@@ -21629,11 +21629,11 @@ mod tests {
         match &unless_pay.cost {
             AbilityCost::OneOf { costs } => {
                 assert_eq!(costs.len(), 2, "expected Sacrifice|Discard, got {costs:?}");
-                let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+                let AbilityCost::Sacrifice(sac) = &costs[0] else {
                     panic!("first branch should be Sacrifice, got {:?}", costs[0]);
                 };
-                let TargetFilter::Typed(tf) = target else {
-                    panic!("sacrifice target should be typed, got {target:?}");
+                let TargetFilter::Typed(tf) = &sac.target else {
+                    panic!("sacrifice target should be typed, got {0:?}", sac.target);
                 };
                 assert_eq!(tf.controller, Some(ControllerRef::You));
                 assert!(matches!(costs[1], AbilityCost::Discard { .. }));
@@ -21660,11 +21660,11 @@ mod tests {
         let AbilityCost::OneOf { costs } = &unless_pay.cost else {
             unreachable!("checked OneOf cost above");
         };
-        let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+        let AbilityCost::Sacrifice(sac) = &costs[0] else {
             panic!("first branch should be Sacrifice, got {:?}", costs[0]);
         };
-        let TargetFilter::Typed(tf) = target else {
-            panic!("sacrifice target should be typed, got {target:?}");
+        let TargetFilter::Typed(tf) = &sac.target else {
+            panic!("sacrifice target should be typed, got {0:?}", sac.target);
         };
         assert_eq!(tf.controller, Some(ControllerRef::You));
         // CR 118.12a: non-scoped "target player" punisher keeps `Player`
@@ -21691,11 +21691,11 @@ mod tests {
         let AbilityCost::OneOf { costs } = &unless_pay.cost else {
             unreachable!("checked OneOf cost above");
         };
-        let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+        let AbilityCost::Sacrifice(sac) = &costs[0] else {
             panic!("first branch should be Sacrifice, got {:?}", costs[0]);
         };
-        let TargetFilter::Typed(tf) = target else {
-            panic!("sacrifice target should be typed, got {target:?}");
+        let TargetFilter::Typed(tf) = &sac.target else {
+            panic!("sacrifice target should be typed, got {0:?}", sac.target);
         };
         assert_eq!(tf.controller, Some(ControllerRef::You));
     }
@@ -22903,7 +22903,11 @@ mod tests {
                 ..
             } => {
                 assert_eq!(destination, Zone::Battlefield);
-                assert!(matches!(target, TargetFilter::Typed(_)), "got {target:?}");
+                assert!(
+                    matches!(target, TargetFilter::Typed(_)),
+                    "got {0:?}",
+                    target
+                );
             }
             other => panic!("expected ChangeZone, got {other:?}"),
         }
@@ -26686,7 +26690,8 @@ mod tests {
         assert_eq!(
             target,
             &Some(TargetFilter::ParentTarget),
-            "outer target must be ParentTarget, got {target:?}"
+            "outer target must be ParentTarget, got {0:?}",
+            target
         );
         let static_def = &static_abilities[0];
         // Axis 1 inner: static_def.affected was SelfRef before fix; now ParentTarget.
@@ -28307,7 +28312,8 @@ mod tests {
         };
         assert!(
             !filter_contains_cmc_prop(target),
-            "kicked override target must not keep base mana-value restriction; got {target:?}",
+            "kicked override target must not keep base mana-value restriction; got {0:?}",
+            target,
         );
     }
 
@@ -31567,7 +31573,8 @@ mod tests {
             } => {
                 assert!(
                     matches!(target, TargetFilter::Player),
-                    "Expected Player target, got {target:?}",
+                    "Expected Player target, got {0:?}",
+                    target,
                 );
                 assert_eq!(*destination, crate::types::zones::Zone::Graveyard);
                 assert_eq!(
@@ -32053,7 +32060,7 @@ mod tests {
         assert!(forced_to.is_none());
         // Should be Or(StackSpell+HasSingleTarget, StackAbility+HasSingleTarget)
         let TargetFilter::Or { filters } = &target else {
-            panic!("Expected Or filter, got {target:?}");
+            panic!("Expected Or filter, got {0:?}", target);
         };
         assert_eq!(filters.len(), 2);
         for f in filters {
@@ -32110,7 +32117,7 @@ mod tests {
         assert!(forced_to.is_none());
         // Should be Or(Instant+InZone(Stack), Sorcery+InZone(Stack))
         let TargetFilter::Or { filters } = &target else {
-            panic!("Expected Or filter, got {target:?}");
+            panic!("Expected Or filter, got {0:?}", target);
         };
         assert_eq!(filters.len(), 2);
         let types: Vec<_> = filters
@@ -33221,7 +33228,10 @@ mod tests {
         match &*return_sub.effect {
             Effect::Bounce { target, .. } => {
                 let TargetFilter::Typed(typed) = target else {
-                    panic!("expected typed graveyard permanent target, got {target:?}");
+                    panic!(
+                        "expected typed graveyard permanent target, got {0:?}",
+                        target
+                    );
                 };
                 assert!(typed.type_filters.contains(&TypeFilter::Permanent));
                 assert!(typed.properties.iter().any(|p| {
@@ -34515,7 +34525,7 @@ mod tests {
             properties,
         }) = target
         else {
-            panic!("expected typed creature filter, got {target:?}");
+            panic!("expected typed creature filter, got {0:?}", target);
         };
         assert!(type_filters.contains(&TypeFilter::Creature));
         assert_eq!(controller, &Some(ControllerRef::You));
@@ -36055,7 +36065,8 @@ mod tests {
             Effect::Counter { target, .. } => {
                 assert!(
                     is_stack_spell_leg(target),
-                    "expected StackSpell, got {target:?}"
+                    "expected StackSpell, got {0:?}",
+                    target
                 );
             }
             other => panic!("expected Counter effect, got {other:?}"),
@@ -37309,7 +37320,7 @@ mod tests {
         match &*execute.effect {
             Effect::TargetOnly { target } => {
                 let TargetFilter::Typed(tf) = target else {
-                    panic!("expected typed target, got {target:?}");
+                    panic!("expected typed target, got {0:?}", target);
                 };
                 assert!(matches!(
                     tf.controller,
@@ -38365,7 +38376,8 @@ mod tests {
                 assert_eq!(subject, &TargetFilter::ParentTarget);
                 assert!(
                     matches!(target, TargetFilter::Typed(_)),
-                    "fight opponent target should remain typed, got {target:?}"
+                    "fight opponent target should remain typed, got {0:?}",
+                    target
                 );
             }
             other => panic!("expected Fight sub-ability, got {other:?}"),
@@ -38974,7 +38986,7 @@ mod tests {
         );
         match &*def.effect {
             Effect::Pump { target, .. } => {
-                assert_eq!(target, &TargetFilter::SelfRef, "got {target:?}");
+                assert_eq!(target, &TargetFilter::SelfRef, "got {0:?}", target);
             }
             other => panic!("expected Pump effect, got {other:?}"),
         }
@@ -39012,7 +39024,8 @@ mod tests {
                 assert_eq!(
                     target,
                     &TargetFilter::SelfRef,
-                    "Pump target should be SelfRef, got {target:?}",
+                    "Pump target should be SelfRef, got {0:?}",
+                    target,
                 );
             }
             other => panic!("expected Pump effect, got {other:?}"),
@@ -39067,7 +39080,8 @@ mod tests {
                 // source object, never the opponent player).
                 assert!(
                     matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef),
-                    "copy source must remain a context ref, got {target:?}"
+                    "copy source must remain a context ref, got {0:?}",
+                    target
                 );
             }
             other => panic!("expected CopyTokenOf, got: {other:?}"),
@@ -39093,7 +39107,8 @@ mod tests {
                     assert_eq!(
                         target_filter_controller_ref(target),
                         Some(ControllerRef::TargetPlayer),
-                        "{text:?} must scope the sacrificed filter to TargetPlayer, got {target:?}"
+                        "{text:?} must scope the sacrificed filter to TargetPlayer, got {0:?}",
+                        target
                     );
                 }
                 other => panic!("expected Sacrifice for {text:?}, got: {other:?}"),
@@ -39124,7 +39139,8 @@ mod tests {
                 assert_eq!(
                     target_filter_controller_ref(target),
                     Some(ControllerRef::ScopedPlayer),
-                    "moved-object filter must be scoped to ScopedPlayer, got {target:?}",
+                    "moved-object filter must be scoped to ScopedPlayer, got {0:?}",
+                    target,
                 );
             }
             other => panic!("expected ChangeZone, got: {other:?}"),
@@ -39146,7 +39162,8 @@ mod tests {
             Effect::PumpAll { target, .. } => {
                 assert!(
                     matches!(target, TargetFilter::Typed(t) if t.type_filters.contains(&crate::types::ability::TypeFilter::Creature)),
-                    "expected PumpAll target TypedFilter::Creature, got {target:?}"
+                    "expected PumpAll target TypedFilter::Creature, got {0:?}",
+                    target
                 );
             }
             other => panic!("expected PumpAll, got: {other:?}"),
@@ -40491,7 +40508,7 @@ mod tests {
             panic!("expected DestroyAll, got {:?}", sub.effect);
         };
         let TargetFilter::Typed(typed) = target else {
-            panic!("expected Typed filter, got {target:?}");
+            panic!("expected Typed filter, got {0:?}", target);
         };
         assert!(
             typed
@@ -42833,7 +42850,7 @@ mod tests {
         };
         assert!(*up_to, "\"any number\" includes zero");
         let TargetFilter::Typed(TypedFilter { properties, .. }) = target else {
-            panic!("expected typed hand filter, got {target:?}");
+            panic!("expected typed hand filter, got {0:?}", target);
         };
         assert!(properties
             .iter()
@@ -42872,7 +42889,7 @@ mod tests {
         };
         assert_eq!(destination, Zone::Battlefield);
         let TargetFilter::Typed(typed) = target else {
-            panic!("expected typed hand filter, got {target:?}");
+            panic!("expected typed hand filter, got {0:?}", target);
         };
         assert!(
             typed
@@ -43007,7 +43024,7 @@ mod tests {
         };
         assert_eq!(destination, Zone::Battlefield);
         let TargetFilter::TrackedSetFiltered { id, filter } = target else {
-            panic!("expected TrackedSetFiltered target, got {target:?}");
+            panic!("expected TrackedSetFiltered target, got {0:?}", target);
         };
         assert_eq!(id, crate::types::identifiers::TrackedSetId(0));
         let TargetFilter::Typed(typed) = *filter else {
@@ -43219,7 +43236,8 @@ mod tests {
                 // matters is that the runtime has a target binding to fill.
                 assert!(
                     !matches!(target, TargetFilter::Any),
-                    "Attach target slot must not be Any, got {target:?}"
+                    "Attach target slot must not be Any, got {0:?}",
+                    target
                 );
                 if let TargetFilter::Typed(t) = target {
                     assert_eq!(t.controller, Some(ControllerRef::You));
@@ -45084,7 +45102,7 @@ mod snapshot_tests {
         assert_eq!(*destination, Zone::Battlefield);
         assert!(enter_tapped.is_tapped());
         let TargetFilter::Typed(primary) = target else {
-            panic!("expected typed primary target, got {target:?}");
+            panic!("expected typed primary target, got {0:?}", target);
         };
         assert!(primary.properties.contains(&FilterProp::InZone {
             zone: Zone::Graveyard
@@ -45114,7 +45132,7 @@ mod snapshot_tests {
         assert_eq!(*enters_under, None);
         assert!(enter_tapped.is_tapped());
         let TargetFilter::Typed(tail) = target else {
-            panic!("expected typed same-name tail, got {target:?}");
+            panic!("expected typed same-name tail, got {0:?}", target);
         };
         assert!(tail.properties.contains(&FilterProp::InZone {
             zone: Zone::Graveyard
@@ -45486,7 +45504,7 @@ mod snapshot_tests {
             panic!("node 1 must be PutCounter, got {:?}", node1.effect);
         };
         let TargetFilter::Typed(tf) = target else {
-            panic!("PutCounter target must be Typed, got {target:?}");
+            panic!("PutCounter target must be Typed, got {0:?}", target);
         };
         assert_eq!(
             tf.controller,
@@ -45606,7 +45624,10 @@ mod snapshot_tests {
             panic!("node 3 must be Bounce, got {:?}", bounce.effect);
         };
         let TargetFilter::Typed(tf) = target else {
-            panic!("node 3 Bounce target must be a Typed filter, got {target:?}");
+            panic!(
+                "node 3 Bounce target must be a Typed filter, got {0:?}",
+                target
+            );
         };
         assert!(
             tf.properties.iter().any(|prop| matches!(
@@ -45650,7 +45671,8 @@ mod snapshot_tests {
                     if tf.controller == Some(ControllerRef::You)
                     && tf.type_filters == vec![TypeFilter::Land]
             ),
-            "sacrifice target must be lands you control, got {target:?}"
+            "sacrifice target must be lands you control, got {0:?}",
+            target
         );
         let QuantityExpr::Difference { left, right } = count else {
             panic!("sacrifice count must be a Difference, got {count:?}");
@@ -45848,7 +45870,8 @@ mod snapshot_tests {
         };
         assert!(
             target.chosen_player_index() == Some(0),
-            "Draw must target ChosenPlayer {{0}}, got {target:?}"
+            "Draw must target ChosenPlayer {{0}}, got {0:?}",
+            target
         );
         let exile = draw_effect
             .sub_ability
@@ -46002,7 +46025,7 @@ fn issue_2402_hazel_copy_target_token_trigger_parses() {
         );
     };
     let TargetFilter::Typed(tf) = target else {
-        panic!("expected typed target token filter, got {target:?}");
+        panic!("expected typed target token filter, got {0:?}", target);
     };
     assert_eq!(tf.controller, Some(ControllerRef::You));
     assert!(tf
