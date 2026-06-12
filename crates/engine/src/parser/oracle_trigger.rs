@@ -6044,6 +6044,40 @@ fn split_taps_for_mana_for_clause(text: &str) -> Option<(String, Option<Vec<Mana
     Some((subject.to_string(), produced))
 }
 
+/// CR 509.1h: Strip a trailing "and isn't/aren't blocked" qualifier from attack
+/// trigger event text. Covers singular self-referential phrasing ("attacks and
+/// isn't blocked", Frenzy) and plural batched phrasing ("attack you and aren't
+/// blocked", Coveted Jewel).
+fn strip_attack_unblocked_qualifier(after: &str) -> (bool, &str) {
+    fn parse_suffix(input: &str) -> OracleResult<'_, &str> {
+        alt((
+            terminated(take_until(" and isn't blocked"), tag(" and isn't blocked")),
+            terminated(
+                take_until(" and isn\u{2019}t blocked"),
+                tag(" and isn\u{2019}t blocked"),
+            ),
+            terminated(
+                take_until(" and aren't blocked"),
+                tag(" and aren't blocked"),
+            ),
+            terminated(
+                take_until(" and aren\u{2019}t blocked"),
+                tag(" and aren\u{2019}t blocked"),
+            ),
+            terminated(
+                take_until(" and are not blocked"),
+                tag(" and are not blocked"),
+            ),
+        ))
+        .parse(input)
+    }
+
+    if let Ok((_, rest)) = all_consuming(parse_suffix).parse(after) {
+        return (true, rest);
+    }
+    (false, after)
+}
+
 /// Try to parse an event verb and build a TriggerDefinition from subject + event.
 fn try_parse_event(
     subject: &TargetFilter,
@@ -6284,15 +6318,7 @@ fn try_parse_event(
                 .filter(|r| !r.starts_with("er") && !r.starts_with("ing"))
         });
     if let Some(after) = attacks_result {
-        let attacks_and_isnt_blocked = value(
-            (),
-            alt((
-                tag::<_, _, OracleError<'_>>(" and isn't blocked"),
-                tag(" and isn\u{2019}t blocked"),
-            )),
-        )
-        .parse(after)
-        .is_ok();
+        let (attacks_and_unblocked, after) = strip_attack_unblocked_qualifier(after);
         // CR 508.3a: Detect attack target qualifier ("attacks a planeswalker" etc.)
         fn parse_attack_target(input: &str) -> OracleResult<'_, AttackTargetFilter> {
             alt((
@@ -6330,8 +6356,10 @@ fn try_parse_event(
                 attack_target_filter,
                 Some(AttackTargetFilter::PlayerOrPlaneswalker) | Some(AttackTargetFilter::Player)
             ) && tag::<_, _, OracleError<'_>>(" you").parse(after).is_ok();
-        def.mode = if attacks_and_isnt_blocked && matches!(subject, TargetFilter::SelfRef) {
+        def.mode = if attacks_and_unblocked && matches!(subject, TargetFilter::SelfRef) {
             TriggerMode::AttackerUnblocked
+        } else if attacks_and_unblocked {
+            TriggerMode::YouAttackUnblocked
         } else if is_opponent_attacks_you {
             TriggerMode::AttackersDeclared
         } else {
@@ -11579,13 +11607,13 @@ mod tests {
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, AttackScope, AttackSubject,
-        BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute, Comparator,
-        ContinuousModification, ControllerRef, CountScope, DamageModification, DamageSource,
-        DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
-        ManaProduction, ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat,
-        PtValue, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, TapStateChange,
-        TargetFilter, TypeFilter, TypedFilter,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
+        AttackScope, AttackSubject, BounceSelection, CardSelectionMode, CastingPermission,
+        ChosenAttribute, Comparator, ContinuousModification, ControllerRef, CountScope,
+        DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration,
+        Effect, EffectScope, FilterProp, ManaProduction, ManaSpendPermission, ObjectScope,
+        PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        SharedQuality, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::WaitingFor;
@@ -12870,6 +12898,83 @@ mod tests {
             }
             other => panic!("Expected Mill, got {other:?}"),
         }
+    }
+
+    /// Issue #1354 — full Coveted Jewel Oracle must retain the unblocked-attack trigger.
+    #[test]
+    fn coveted_jewel_full_oracle_parses_you_attack_unblocked_trigger() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "When this artifact enters, draw three cards.\n\
+             {T}: Add three mana of any one color.\n\
+             Whenever one or more creatures an opponent controls attack you and aren't blocked, \
+             that player draws three cards and gains control of this artifact. Untap it.",
+            "Coveted Jewel",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .any(|trigger| { matches!(trigger.mode, TriggerMode::YouAttackUnblocked) }),
+            "expected YouAttackUnblocked among {:?}",
+            parsed
+                .triggers
+                .iter()
+                .map(|trigger| format!("{:?}", trigger.mode))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Issue #1354 — Coveted Jewel: plural "aren't blocked" on a batched opponent-
+    /// creature attack must fire after blockers are declared, not at attack declaration.
+    #[test]
+    fn trigger_opponent_creatures_attack_you_and_arent_blocked_uses_you_attack_unblocked() {
+        let def = parse_trigger_line(
+            "Whenever one or more creatures an opponent controls attack you and aren't blocked, that player draws three cards and gains control of this artifact. Untap it.",
+            "Coveted Jewel",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttackUnblocked);
+        assert!(def.batched);
+        assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        fn effect_chain_contains_give_control_self(ability: &AbilityDefinition) -> bool {
+            match ability.effect.as_ref() {
+                Effect::GiveControl {
+                    target: TargetFilter::SelfRef,
+                    ..
+                } => true,
+                _ => ability
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|sub| effect_chain_contains_give_control_self(sub)),
+            }
+        }
+        fn effect_chain_contains_untap_self(ability: &AbilityDefinition) -> bool {
+            match ability.effect.as_ref() {
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                } => true,
+                _ => ability
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|sub| effect_chain_contains_untap_self(sub)),
+            }
+        }
+        assert!(
+            effect_chain_contains_give_control_self(execute),
+            "expected GiveControl of SelfRef in effect chain, got {:?}",
+            execute.effect
+        );
+        assert!(
+            effect_chain_contains_untap_self(execute),
+            "expected Untap of SelfRef in effect chain, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]
