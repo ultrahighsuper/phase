@@ -13803,6 +13803,7 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Manifest { target, .. }
         | Effect::TargetOnly { target, .. } => f(target),
         Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => f(target),
+        Effect::GoadAll { target } => f(target),
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => f(target),
         Effect::LoseLife {
             target: Some(target),
@@ -13980,6 +13981,13 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     }
 
     each_quantity_expr_mut(&mut def.effect, &mut rewrite_quantity_expr);
+    // CR 608.2 + CR 109.5: Rebind actor-default `You` controllers to
+    // `ScopedPlayer` for each-*player* iterations only. Each-opponent scopes
+    // keep `You` so optional opponent-choice sacrifices ("permanent of their
+    // choice") retain the chooser-as-controller binding (issue #2903).
+    if matches!(def.player_scope, Some(PlayerFilter::All)) {
+        each_target_filter_mut(&mut def.effect, &mut rewrite_filter_controller_to_scoped);
+    }
     if let Some(condition) = def.condition.as_mut() {
         rewrite_condition(condition);
     }
@@ -24444,6 +24452,46 @@ mod tests {
             matches!(&*execute.effect, Effect::Discard { .. }),
             "expected Discard, got {:?}",
             execute.effect
+        );
+    }
+
+    #[test]
+    fn agitator_ant_end_step_counters_and_goad_parsed() {
+        // Issue #2903: optional per-player counter placement on each player's
+        // creature, then goad only creatures that received counters this way.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "At the beginning of your end step, each player may put two +1/+1 counters on a creature they control. Goad each creature that had counters put on it this way.",
+            "Agitator Ant",
+            &[],
+            &["Creature".to_string()],
+            &["Insect".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("Agitator Ant trigger execute");
+        assert!(
+            execute.optional,
+            "counter placement must be optional (each player MAY)"
+        );
+        assert_eq!(execute.player_scope, Some(PlayerFilter::All));
+        let Effect::PutCounter { target, .. } = execute.effect.as_ref() else {
+            panic!("expected PutCounter, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::ScopedPlayer))
+        );
+        let sub = execute.sub_ability.as_ref().expect("goad sub_ability");
+        let Effect::GoadAll { target } = sub.effect.as_ref() else {
+            panic!("expected GoadAll, got {:?}", sub.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(0),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            }
         );
     }
 

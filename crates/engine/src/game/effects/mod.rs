@@ -2438,6 +2438,11 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
             return true;
         }
     }
+    if let Effect::GoadAll { target } = effect {
+        if filter_references_tracked_set(target) {
+            return true;
+        }
+    }
     if let Effect::SetTapState {
         scope: EffectScope::All,
         target,
@@ -9484,6 +9489,70 @@ mod tests {
         assert!(
             state.objects.get(&noncreature).unwrap().tapped,
             "non-gained object must not be included in the tracked set"
+        );
+    }
+
+    /// CR 608.2c + CR 701.15a + CR 122.1: when a counter instruction is
+    /// followed by "goad each creature that had counters put on it this way",
+    /// the countered objects publish as the tracked set consumed by GoadAll.
+    #[test]
+    fn put_counter_publishes_tracked_set_for_goad_all_tail() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Agitator Ant".to_string(),
+            Zone::Battlefield,
+        );
+        let countered = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Countered Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Other Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [countered, other] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let goad_countered_this_way = ResolvedAbility::new(
+            Effect::GoadAll {
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let put_counter = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(countered)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(goad_countered_this_way);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &put_counter, &mut events, 0).unwrap();
+
+        assert!(state.objects[&countered].goaded_by.contains(&PlayerId(0)));
+        assert!(
+            !state.objects[&other].goaded_by.contains(&PlayerId(0)),
+            "only the creature that received counters this way should be goaded"
         );
     }
 
