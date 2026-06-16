@@ -287,6 +287,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- Explore replacement: "If a creature you control would explore, instead …"
+    // (Twists and Turns / Topography Tracker class).
+    if nom_primitives::scan_contains(&lower, "would explore") {
+        if let Some(def) = parse_explore_replacement(&lower, &text) {
+            return Some(def);
+        }
+    }
+
     // --- "If you would draw a card, {effect}" ---
     if nom_primitives::scan_contains(&lower, "you would draw") {
         let effect_text = extract_replacement_effect(&normalized);
@@ -4622,6 +4630,26 @@ fn parse_scry_count_replacement(lower: &str, original_text: &str) -> Option<Repl
     Some(
         ReplacementDefinition::new(ReplacementEvent::Scry)
             .execute(AbilityDefinition::new(AbilityKind::Spell, effect))
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 701.44 + CR 614.1a: Parse explore replacement effects such as Twists and
+/// Turns ("instead you scry 1, then that creature explores") and Topography
+/// Tracker ("instead it explores, then it explores again").
+fn parse_explore_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    if !nom_primitives::scan_contains(lower, "if a creature you control would explore") {
+        return None;
+    }
+    let (_, execute_text) = split_once_on_lower(original_text, lower, "instead ")?;
+    let execute_text = execute_text.trim().trim_end_matches('.');
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Explore)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .execute(parse_effect_chain(execute_text, AbilityKind::Spell))
             .description(original_text.to_string()),
     )
 }
@@ -12410,6 +12438,34 @@ mod tests {
         .expect("halving season");
         assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+    }
+
+    #[test]
+    fn parses_explore_replacement_scry_prelude() {
+        let def = parse_replacement_line(
+            "If a creature you control would explore, instead you scry 1, then that creature explores.",
+            "Twists and Turns",
+        )
+        .expect("Twists and Turns explore replacement must parse");
+        assert_eq!(def.event, ReplacementEvent::Explore);
+        assert!(matches!(
+            def.valid_card,
+            Some(TargetFilter::Typed(tf))
+                if tf.type_filters == vec![TypeFilter::Creature]
+                    && tf.controller == Some(ControllerRef::You)
+        ));
+        assert!(def.execute.is_some());
+    }
+
+    #[test]
+    fn parses_explore_replacement_double_explore() {
+        let def = parse_replacement_line(
+            "If a creature you control would explore, instead it explores, then it explores again.",
+            "Topography Tracker",
+        )
+        .expect("Topography Tracker explore replacement must parse");
+        assert_eq!(def.event, ReplacementEvent::Explore);
+        assert!(def.execute.is_some());
     }
 
     #[test]

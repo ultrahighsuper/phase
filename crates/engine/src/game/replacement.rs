@@ -1569,6 +1569,69 @@ fn scry_applier(
     }
 }
 
+// --- 4d. Explore (Twists and Turns / Topography Tracker) ---
+
+// CR 701.37a + CR 614.1a: A creature is about to explore. Replacement
+// effects can modify the explore action (e.g., add a scry prelude or double explore).
+fn explore_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::Explore { .. })
+}
+
+fn explore_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let ProposedEvent::Explore { object_id, applied } = event else {
+        return ApplyResult::Modified(event);
+    };
+
+    let Some(source) = state.objects.get(&rid.source) else {
+        return ApplyResult::Modified(ProposedEvent::Explore { object_id, applied });
+    };
+    let Some(execute) = source
+        .replacement_definitions
+        .get(rid.index)
+        .and_then(|def| def.execute.clone())
+    else {
+        return ApplyResult::Modified(ProposedEvent::Explore { object_id, applied });
+    };
+
+    use crate::game::ability_utils::build_resolved_from_def;
+    use crate::types::ability::TargetRef;
+
+    let controller = source.controller;
+    let mut current = Some(execute.as_ref());
+    while let Some(def) = current {
+        match &*def.effect {
+            Effect::Scry { .. } => {
+                let ability = build_resolved_from_def(def, rid.source, controller);
+                let _ = crate::game::effects::scry::resolve(state, &ability, events);
+            }
+            Effect::Explore => {
+                let ability = ResolvedAbility::new(
+                    Effect::Explore,
+                    vec![TargetRef::Object(object_id)],
+                    rid.source,
+                    controller,
+                );
+                let _ = crate::game::effects::explore::resolve_explore_effect(
+                    state, &ability, object_id, events,
+                );
+            }
+            _ => {
+                let mut ability = build_resolved_from_def(def, rid.source, controller);
+                ability.targets = vec![TargetRef::Object(object_id)];
+                let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
+            }
+        }
+        current = def.sub_ability.as_deref();
+    }
+
+    ApplyResult::Prevented
+}
+
 // --- 4c. CoinFlip (Krark's Thumb) ---
 
 // CR 705.1 + CR 614.1a: A coin flip is about to happen. Krark's Thumb replaces
@@ -2663,6 +2726,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
         ReplacementHandlerEntry {
             matcher: scry_matcher,
             applier: scry_applier,
+        },
+    );
+    registry.insert(
+        ReplacementEvent::Explore,
+        ReplacementHandlerEntry {
+            matcher: explore_matcher,
+            applier: explore_applier,
         },
     );
     registry.insert(
