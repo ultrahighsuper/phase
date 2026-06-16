@@ -11238,7 +11238,8 @@ mod tests {
         // CR 614.6 + CR 122.1: "<type> can't have counters put on them" lowers to
         // the AddCounter+Prevent replacement scoped to that permanent type. The
         // single combinator covers every permanent type, so creatures (#3450),
-        // planeswalkers (#3453), and artifacts (#3455) are all handled by one arm.
+        // planeswalkers (#3453), artifacts (#3455, #3502), and lands are all
+        // handled by one arm — no per-type parallel tests needed.
         for (oracle_type, expected) in [
             ("Creatures", TypeFilter::Creature),
             ("Planeswalkers", TypeFilter::Planeswalker),
@@ -12392,41 +12393,6 @@ mod tests {
             Some(QuantityModification::Plus { value: 1 })
         );
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
-    }
-
-    #[test]
-    fn inverted_counter_prohibition_planeswalkers() {
-        let def = parse_replacement_line(
-            "Planeswalkers can't have counters put on them.",
-            "Test Card",
-        )
-        .expect("planeswalker counter prohibition must parse");
-        assert_eq!(def.event, ReplacementEvent::AddCounter);
-        assert_eq!(
-            def.quantity_modification,
-            Some(QuantityModification::Prevent)
-        );
-        assert!(matches!(
-            def.valid_card,
-            Some(TargetFilter::Typed(tf))
-                if tf.type_filters == vec![TypeFilter::Planeswalker]
-        ));
-    }
-
-    #[test]
-    fn inverted_counter_prohibition_artifacts() {
-        let def = parse_replacement_line("Artifacts can't have counters put on them.", "Test Card")
-            .expect("artifact counter prohibition must parse");
-        assert_eq!(def.event, ReplacementEvent::AddCounter);
-        assert_eq!(
-            def.quantity_modification,
-            Some(QuantityModification::Prevent)
-        );
-        assert!(matches!(
-            def.valid_card,
-            Some(TargetFilter::Typed(tf))
-                if tf.type_filters == vec![TypeFilter::Artifact]
-        ));
     }
 
     #[test]
