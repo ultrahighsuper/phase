@@ -353,6 +353,7 @@ mod spikeshell_harrier_speed_superlative;
 mod springheart_nantuko_bestow_landfall;
 mod springheart_realdb_repro;
 mod steadfast_armasaur_lki_toughness;
+mod stensian_sanguinist_prepare;
 mod support;
 mod suppressor_skyguard_prevent_2924;
 mod surveil_rest_pile_redirect_continuation;
