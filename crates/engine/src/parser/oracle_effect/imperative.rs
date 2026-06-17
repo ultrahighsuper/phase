@@ -1307,7 +1307,21 @@ pub(super) fn parse_targeted_action_ast(
         // chains, etc. The count is a game-state integer reference, not the
         // CR 609.3 "do as much as possible" rule.
         let after_discard_lower = after_discard.to_ascii_lowercase();
-        if let Some(count) = parse_dynamic_count_phrase(after_discard_lower.as_str()) {
+        if let Some(mut count) = parse_dynamic_count_phrase(after_discard_lower.as_str()) {
+            // CR 608.2c: "If you do, discard that many cards" anaphorizes the
+            // count from the preceding draw (Hordewing Skaab). EventContextAmount
+            // incorrectly prefers the combat-damage trigger's match count and
+            // can discard the entire hand (issue #3296).
+            if matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }
+            ) {
+                count = QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                };
+            }
             let filter = parse_discard_card_filter(after_discard);
             return Some(TargetedImperativeAst::Discard {
                 count,

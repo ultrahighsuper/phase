@@ -50422,6 +50422,27 @@ mod snapshot_tests {
         assert_json_snapshot!("continuation_draw_then_discard", def);
     }
 
+    /// Issue #3296: the "If you do, discard that many cards" rider must read the
+    /// draw count via `PreviousEffectAmount`, not the combat-damage trigger's
+    /// `EventContextAmount` (which can equal the whole hand size).
+    #[test]
+    fn hordewing_skaab_discard_that_many_uses_previous_effect_amount() {
+        let def = parse_effect_chain(
+            "you may draw cards equal to the number of opponents dealt damage this way. If you do, discard that many cards.",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_ref().expect("discard rider sub_ability");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                },
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn continuation_search_put_onto_battlefield_tapped_then_shuffle() {
         let def = parse_effect_chain(
