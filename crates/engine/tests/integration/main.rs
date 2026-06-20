@@ -310,6 +310,7 @@ mod issue_3681_inferno_titan_divided_damage;
 mod issue_3872_tithe_taker_turn_scoped_tax;
 mod issue_3874_emet_selch_optional_decline;
 mod issue_3875_kozilek_graveyard_shuffle;
+mod issue_3876_gadrak_treasure_count;
 mod issue_536_six_grants_retrace;
 mod issue_541_endurance_graveyard_to_bottom;
 mod issue_544_krark_clan_ironworks_auto_pass;
