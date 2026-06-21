@@ -3428,6 +3428,26 @@ pub enum TapStateChange {
     Untap,
 }
 
+/// CR 709.5f-g: Operation an [`Effect::SetRoomDoorLock`] performs on a door
+/// (half) of a Room permanent. Typed (not a bool) so serialized engine state
+/// and the door-choice prompt say which direction is being applied, and so the
+/// "lock or unlock" disjunction is a first-class third operation rather than an
+/// inexpressible boolean combination. Parameterizes the lock/unlock axis — both
+/// live within CR rule section 709.5 — into one effect variant instead of two
+/// sibling effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DoorLockOp {
+    /// CR 709.5f: choose a locked half and give it the unlocked designation.
+    Unlock,
+    /// CR 709.5g: choose an unlocked half and remove its unlocked designation.
+    Lock,
+    /// CR 709.5f + CR 709.5g: "Lock or unlock a door" — the player chooses both
+    /// the operation and the eligible half at resolution (Keys to the House,
+    /// Marina Vendrell).
+    LockOrUnlock,
+}
+
 /// CR 102 + CR 119 + CR 402: Player axis for player-scoped quantity references.
 ///
 /// Parameterizes the player whose hand size, life total, or other per-player
@@ -9388,6 +9408,19 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 709.5f-g + CR 709.5j: Lock or unlock a door (half) of the targeted
+    /// Room permanent. `op` fixes the direction (or `LockOrUnlock` lets the
+    /// player choose); `target` selects the Room. The eligible half is chosen at
+    /// resolution from the Room's runtime unlock state — locked halves for
+    /// `Unlock`, unlocked halves for `Lock` — so the choice cannot be baked into
+    /// static branches at parse time. Covers Ghostly Keybearer ("unlock a locked
+    /// door of up to one target Room you control"), Keys to the House, and Marina
+    /// Vendrell ("lock or unlock a door of target Room you control").
+    SetRoomDoorLock {
+        op: DoorLockOp,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// CR 701.12a: Exchange control of two target permanents. Each slot carries its
     /// own filter so patterns like "target X you control and target Y an opponent
     /// controls" (Oko, Political Trickery, Shrewd Negotiation) declare distinct
@@ -10531,6 +10564,10 @@ impl Effect {
             | Effect::PutOnTopOrBottom { target, .. }
             | Effect::Goad { target, .. }
             | Effect::Detain { target, .. }
+            // CR 709.5f-g: the Room is a real declared target ("target Room you
+            // control"); surface it so the cast/trigger-time target slot is
+            // built and CR 608.2b re-validates it at resolution.
+            | Effect::SetRoomDoorLock { target, .. }
             | Effect::ExtraTurn { target, .. }
             | Effect::GrantExtraLoyaltyActivations { target, .. }
             | Effect::SkipNextTurn { target, .. }
@@ -10964,6 +11001,7 @@ impl Effect {
             | Effect::GoadAll { .. }
             | Effect::Goad { .. }
             | Effect::Detain { .. }
+            | Effect::SetRoomDoorLock { .. }
             | Effect::ExtraTurn { .. }
             | Effect::Transform { .. }
             | Effect::RevealTop { .. }
@@ -11175,6 +11213,7 @@ impl Effect {
             | Effect::GoadAll { .. }
             | Effect::Goad { .. }
             | Effect::Detain { .. }
+            | Effect::SetRoomDoorLock { .. }
             | Effect::ExtraTurn { .. }
             | Effect::Transform { .. }
             | Effect::RevealTop { .. }
@@ -11427,6 +11466,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Goad { .. } => "Goad",
         Effect::GoadAll { .. } => "GoadAll",
         Effect::Detain { .. } => "Detain",
+        Effect::SetRoomDoorLock { .. } => "SetRoomDoorLock",
         Effect::ExchangeControl { .. } => "ExchangeControl",
         Effect::ChangeTargets { .. } => "ChangeTargets",
         Effect::Incubate { .. } => "Incubate",
@@ -11637,6 +11677,7 @@ pub enum EffectKind {
     Goad,
     GoadAll,
     Detain,
+    SetRoomDoorLock,
     ExchangeControl,
     ChangeTargets,
     Incubate,
@@ -11859,6 +11900,7 @@ impl From<&Effect> for EffectKind {
             Effect::Goad { .. } => EffectKind::Goad,
             Effect::GoadAll { .. } => EffectKind::GoadAll,
             Effect::Detain { .. } => EffectKind::Detain,
+            Effect::SetRoomDoorLock { .. } => EffectKind::SetRoomDoorLock,
             Effect::ExchangeControl { .. } => EffectKind::ExchangeControl,
             Effect::ChangeTargets { .. } => EffectKind::ChangeTargets,
             Effect::Incubate { .. } => EffectKind::Incubate,
