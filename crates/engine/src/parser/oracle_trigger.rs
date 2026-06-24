@@ -7609,6 +7609,27 @@ fn try_parse_event(
     .map(|(tail, _)| tail);
     if let Some(tail) = leaves_tail {
         let tail = tail.trim_start();
+        // CR 603.6c + CR 603.4: Strip trailing "during your turn" condition
+        // before checking for "without dying" or bare tail. CR 603.6c governs
+        // leave-the-battlefield triggers; CR 603.4 governs the intervening-if
+        // turn condition. This supports Oni-Cult Anvil ("one or more artifacts
+        // you control leave the battlefield during your turn") and Suki,
+        // Courageous Rescuer ("another permanent you control leaves the
+        // battlefield during your turn").
+        let (tail, turn_constraint) = peel_trailing_turn_constraint(tail);
+        let turn_condition = match turn_constraint {
+            Some(TriggerConstraint::OnlyDuringYourTurn) => {
+                Some(TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::Controller,
+                })
+            }
+            Some(TriggerConstraint::OnlyDuringOpponentsTurn) => {
+                Some(TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::Opponent,
+                })
+            }
+            _ => None,
+        };
         let without_dying = all_consuming(tag::<_, _, OracleError<'_>>("without dying"))
             .parse(tail)
             .is_ok();
@@ -7618,6 +7639,9 @@ fn try_parse_event(
             def.valid_card = Some(subject.clone());
             if without_dying {
                 def.destination_constraint = DestinationConstraint::NotEquals(Zone::Graveyard);
+            }
+            if let Some(condition) = turn_condition {
+                def.condition = Some(condition);
             }
             // CR 113.6k + CR 603.10: Self-referential LTB triggers (e.g. Oblivion Ring,
             // "when ~ leaves the battlefield") must continue to function after the
@@ -18531,6 +18555,82 @@ mod tests {
         );
     }
 
+    /// CR 603.2c + CR 603.6c: Batched "one or more artifacts you control leave the
+    /// battlefield during your turn" — Oni-Cult Anvil. CR 603.2c covers the
+    /// batched (one-or-more) trigger; CR 603.6c covers the LTB event; CR 603.4
+    /// covers the "during your turn" intervening-if condition. The trailing
+    /// "only once each turn" becomes an OncePerTurn constraint.
+    #[test]
+    fn trigger_one_or_more_artifacts_leave_battlefield_during_your_turn() {
+        let def = parse_trigger_line(
+            "Whenever one or more artifacts you control leave the battlefield during your turn, create a 1/1 colorless Construct artifact creature token. This ability triggers only once each turn.",
+            "Oni-Cult Anvil",
+        );
+        assert_eq!(def.mode, TriggerMode::LeavesBattlefield);
+        assert!(def.batched, "one or more must set batched flag");
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            }),
+            "during your turn must become DuringPlayersTurn condition"
+        );
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OncePerTurn),
+            "'only once each turn' must set OncePerTurn constraint"
+        );
+        assert!(
+            !def.trigger_zones.contains(&Zone::Graveyard),
+            "non-self-ref LTB must not extend to graveyard"
+        );
+    }
+
+    /// CR 603.6c + CR 603.4: Singular "another permanent you control leaves the
+    /// battlefield during your turn" — Suki, Courageous Rescuer. CR 603.6c
+    /// covers the LTB event; CR 603.4 covers the "during your turn"
+    /// intervening-if condition. The trailing "only once each turn" becomes an
+    /// OncePerTurn constraint.
+    #[test]
+    fn trigger_another_permanent_leaves_battlefield_during_your_turn() {
+        let def = parse_trigger_line(
+            "Whenever another permanent you control leaves the battlefield during your turn, create a 1/1 white Ally creature token. This ability triggers only once each turn.",
+            "Suki, Courageous Rescuer",
+        );
+        assert_eq!(def.mode, TriggerMode::LeavesBattlefield);
+        assert!(!def.batched, "singular form must not set batched flag");
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            }),
+            "during your turn must become DuringPlayersTurn condition"
+        );
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OncePerTurn),
+            "'only once each turn' must set OncePerTurn constraint"
+        );
+    }
+
+    /// CR 603.6c + CR 603.4: Synthetic test for an LTB trigger with "during an
+    /// opponent's turn" tail. Proves the opponent-turn branch maps to
+    /// `DuringPlayersTurn { player: Opponent }`.
+    #[test]
+    fn trigger_leaves_battlefield_during_opponents_turn() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control leaves the battlefield during an opponent's turn, draw a card.",
+            "Synthetic Opponent Turn LTB",
+        );
+        assert_eq!(def.mode, TriggerMode::LeavesBattlefield);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Opponent,
+            }),
+            "during an opponent's turn must become DuringPlayersTurn with Opponent"
+        );
+    }
     /// CR 603.6c: "Whenever a permanent is returned to a player's hand" — Warped Devotion.
     #[test]
     fn trigger_returned_to_a_players_hand() {
