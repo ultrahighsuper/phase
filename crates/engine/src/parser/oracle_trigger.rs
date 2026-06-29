@@ -19205,6 +19205,89 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 603.7c (issue #4601): a PHASE-triggered token-copier —
+    /// Mishra, Eminent One: "At the beginning of combat on your turn, create a
+    /// token that's a copy of target noncreature artifact you control, … It
+    /// gains haste until end of turn. Sacrifice it at the beginning of the next
+    /// end step." Unlike the ETB copiers above, a Phase trigger has no
+    /// triggering object, so the bare-"it" in "Sacrifice it" lowers to `SelfRef`
+    /// (the source — Mishra) rather than `TriggeringSource`. The antecedent is
+    /// still the newly created TOKEN, so the delayed sacrifice must bind
+    /// `LastCreated` — otherwise Mishra sacrifices ITSELF at the end step.
+    #[test]
+    fn phase_trigger_token_copier_sacrifice_anaphor_binds_created_token() {
+        fn collect<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&def.effect);
+            if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+                collect(inner, out);
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                collect(sub, out);
+            }
+            if let Some(els) = def.else_ability.as_deref() {
+                collect(els, out);
+            }
+        }
+        let def = parse_trigger_line(
+            "At the beginning of combat on your turn, create a token that's a copy of target noncreature artifact you control, except its name is Mishra's Warform and it's a 4/4 Construct artifact creature in addition to its other types. It gains haste until end of turn. Sacrifice it at the beginning of the next end step.",
+            "Mishra, Eminent One",
+        );
+        let exec = def.execute.as_ref().expect("execute must be Some");
+        let mut effs = Vec::new();
+        collect(exec, &mut effs);
+        let sac_target = effs.iter().find_map(|e| match e {
+            Effect::Sacrifice { target, .. } => Some(target.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            sac_target,
+            Some(TargetFilter::LastCreated),
+            "the delayed 'Sacrifice it' must bind the created token (LastCreated), not \
+             Mishra itself (SelfRef) — otherwise Mishra sacrifices itself at the end step",
+        );
+    }
+
+    /// CR 603.7c + CR 608.2c (issue #4601 review): the same Phase-triggered
+    /// token-copier anaphor, but with a LIBRARY-POSITION cleanup instead of a
+    /// sacrifice — "… create a token that's a copy of target creature you
+    /// control. It gains haste until end of turn. Put it on the bottom of its
+    /// owner's library at the beginning of the next end step." A Phase trigger
+    /// has no triggering object, so the bare-"it" in the delayed "Put it …"
+    /// lowers to `SelfRef`; `Effect::PutAtLibraryPosition` is a token-cleanup
+    /// move just like the sacrifice form, so it must rebind to `LastCreated`.
+    #[test]
+    fn phase_trigger_token_copier_library_cleanup_anaphor_binds_created_token() {
+        fn collect<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&def.effect);
+            if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+                collect(inner, out);
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                collect(sub, out);
+            }
+            if let Some(els) = def.else_ability.as_deref() {
+                collect(els, out);
+            }
+        }
+        let def = parse_trigger_line(
+            "At the beginning of combat on your turn, create a token that's a copy of target creature you control. It gains haste until end of turn. Put it on the bottom of its owner's library at the beginning of the next end step.",
+            "Test Phase Library Copier",
+        );
+        let exec = def.execute.as_ref().expect("execute must be Some");
+        let mut effs = Vec::new();
+        collect(exec, &mut effs);
+        let lib_target = effs.iter().find_map(|e| match e {
+            Effect::PutAtLibraryPosition { target, .. } => Some(target.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            lib_target,
+            Some(TargetFilter::LastCreated),
+            "the delayed 'Put it on the bottom of its owner's library' must bind the \
+             created token (LastCreated), not the source (SelfRef)",
+        );
+    }
+
     #[test]
     fn flicker_enters_trigger_keeps_chosen_target_anaphor() {
         // CR 608.2c: "When ~ enters, you may exile another target permanent you
