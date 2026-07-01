@@ -28561,6 +28561,37 @@ fn perpetual_parser_maps_self_base_pt() {
 }
 
 #[test]
+fn perpetual_parser_maps_referenced_base_pt() {
+    use crate::types::ability::PerpetualModification;
+
+    let e = parse_effect("The duplicate perpetually has base power and toughness 1/1.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: PerpetualModification::SetBasePowerToughness {
+                power: 1,
+                toughness: 1,
+            },
+            ..
+        }
+    ));
+
+    let e = parse_effect("Its base power and toughness perpetually become 2/2.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: PerpetualModification::SetBasePowerToughness {
+                power: 2,
+                toughness: 2,
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
 fn perpetual_parser_maps_modify_pt() {
     use crate::types::ability::PerpetualModification;
     let e = parse_effect("~ perpetually gets +3/+3.");
