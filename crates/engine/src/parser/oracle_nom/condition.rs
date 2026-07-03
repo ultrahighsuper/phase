@@ -2852,7 +2852,7 @@ fn creatures_you_controlled_left_battlefield_this_turn_ref() -> QuantityRef {
     }
 }
 
-/// CR 205.3i + CR 603.4: "a land of each basic land type" — you control a land
+/// CR 205.3i: "a land of each basic land type" — you control a land
 /// with each of the five basic land types (i.e. full domain). Expressed as
 /// `BasicLandTypeCount{You} >= 5`, reusing the domain quantity so the semantics
 /// match every "of each basic land type" clause, not just Coalition Victory.
@@ -2869,7 +2869,7 @@ fn parse_land_of_each_basic_land_type(input: &str) -> OracleResult<'_, StaticCon
     ))
 }
 
-/// CR 105.2 + CR 603.4: "a creature of each color" — you control creatures
+/// CR 105.2: "a creature of each color" — you control creatures
 /// spanning all five colors. Expressed as
 /// `DistinctColorsAmongPermanents{creatures you control} >= 5`, reusing the
 /// distinct-color quantity so the semantics match every "of each color" clause.
@@ -2886,10 +2886,12 @@ fn parse_creature_of_each_color(input: &str) -> OracleResult<'_, StaticCondition
     ))
 }
 
-/// CR 104.2a + CR 603.4: "you control a land of each basic land type and a
-/// creature of each color" — Coalition Victory's win condition. Composes the two
-/// reusable "of each …" sub-combinators with `And`; each is a standalone
-/// building block usable wherever its clause appears.
+/// CR 104.2b + CR 608.2h: "you control a land of each basic land type and a
+/// creature of each color" — Coalition Victory's win condition. CR 104.2b: an
+/// effect may state that a player wins the game; CR 608.2h: the game-state
+/// information the condition needs is determined once, as the spell resolves.
+/// Composes the two reusable "of each …" sub-combinators with `And`; each is a
+/// standalone building block usable wherever its clause appears.
 fn parse_control_land_each_basic_and_creature_each_color(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
@@ -2909,7 +2911,7 @@ fn parse_control_land_each_basic_and_creature_each_color(
 /// attach a trailing "unless you control <X>" clause as a negated condition.
 pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
-        // CR 104.2a: "you control a land of each basic land type and a creature
+        // CR 104.2b: "you control a land of each basic land type and a creature
         // of each color" (Coalition Victory) — tried before the generic
         // `you control a/an [type]` arm so its "a land …" prefix isn't
         // mis-classified as a bare presence check.

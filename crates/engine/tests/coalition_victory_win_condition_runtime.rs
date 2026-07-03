@@ -3,8 +3,9 @@
 //! Oracle: "You win the game if you control a land of each basic land type and a
 //! creature of each color." The trailing "if …" condition was dropped, so the
 //! spell parsed to a bare `Effect::WinTheGame` and casting it won the game
-//! immediately regardless of the board (CR 104.2a + CR 603.4 — the intervening
-//! condition must be checked on resolution). This drives the real cast pipeline:
+//! immediately regardless of the board (CR 104.2b — an effect may state a player
+//! wins the game; CR 608.2h — the game-state check is made once, as the spell
+//! resolves). This drives the real cast pipeline:
 //! casting with an incomplete board must NOT win; casting while controlling a
 //! land of each basic type and a creature of each color must win.
 
