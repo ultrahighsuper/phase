@@ -433,7 +433,7 @@ pub fn room_effects(
         }
         // 2: Oubliette — "Discard a card and sacrifice a creature, an artifact,
         //    and a land."
-        // CR 701.9 (discard) + CR 701.21a (sacrifice: the controller sacrifices
+        // CR 701.9a (discard) + CR 701.21a (sacrifice: the controller sacrifices
         // permanents they control). The controller discards a card, then
         // sacrifices one creature, one artifact, and one land, chained in
         // printed order via sub_ability. Each sacrifice is a count of one with
