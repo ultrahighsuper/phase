@@ -6236,13 +6236,23 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     parse_entered_this_turn_subject(input, entered_suffix, 1)
 }
 
-/// CR 400.7: Parse "N or more [type] <suffix>" into a GE threshold on the
-/// this-turn battlefield ETB count. Shared by the bare past-tense surface
-/// ("N or more creatures entered the battlefield under your control this
-/// turn") and the "you had"-auxiliary present-tense surface ("you had N or
-/// more creatures enter the battlefield under your control this turn", e.g.
-/// Park Heights Pegasus) — both denote the same CR 400.7 this-turn tally, so
-/// the count and suffix are the only axes that vary.
+/// CR 403.3 + CR 608.2h: Parse "N or more [type] <suffix>" into a GE threshold
+/// on the this-turn battlefield-entry count. Shared by the bare past-tense
+/// surface ("N or more creatures entered the battlefield under your control
+/// this turn") and the "you had"-auxiliary present-tense surface ("you had N
+/// or more creatures enter the battlefield under your control this turn", e.g.
+/// Park Heights Pegasus) — both denote the same this-turn entry tally, so the
+/// count and suffix are the only axes that vary.
+///
+/// Uses `QuantityRef::BattlefieldEntriesThisTurn` (the `battlefield_entries_
+/// this_turn` snapshot authority) rather than the live-board `EnteredThisTurn`:
+/// a permanent that entered under your control this turn still counts after it
+/// has left the battlefield (died, was bounced, or sacrificed) before the
+/// condition resolves, because "entered ... this turn" is a historical event,
+/// not a current-board population read. `PlayerScope::Controller` scopes the
+/// tally to entries under the ability controller's control (the runtime keys
+/// on `record.controller`), so the type filter carries no controller of its
+/// own — mirroring the `who had N or more ... enter` for-each authority.
 fn parse_or_more_entered_count<'a>(
     input: &'a str,
     suffix: &'static str,
@@ -6252,10 +6262,15 @@ fn parse_or_more_entered_count<'a>(
     let (rest, type_text) = take_until(suffix).parse(type_and_rest)?;
     let (rest, _) = tag(suffix).parse(rest)?;
     let (filter, _) = parse_type_phrase(type_text.trim());
-    let filter = inject_controller_you(filter);
     Ok((
         rest,
-        make_quantity_ge(QuantityRef::EnteredThisTurn { filter }, n),
+        make_quantity_ge(
+            QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter,
+            },
+            n,
+        ),
     ))
 }
 
@@ -10260,6 +10275,9 @@ mod tests {
 
     #[test]
     fn test_entered_this_turn_count() {
+        // The counted "N or more [type] entered ... this turn" surface reads the
+        // battlefield-entry snapshot (entries that later left still count), not
+        // the live-board `EnteredThisTurn` population.
         let (rest, c) = parse_inner_condition(
             "two or more creatures entered the battlefield under your control this turn",
         )
@@ -10269,12 +10287,16 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::EnteredThisTurn { .. },
+                        qty:
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player: PlayerScope::Controller,
+                                ..
+                            },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 2 },
             } => {}
-            other => panic!("expected EnteredThisTurn GE 2, got {other:?}"),
+            other => panic!("expected BattlefieldEntriesThisTurn GE 2, got {other:?}"),
         }
     }
 
@@ -10370,17 +10392,20 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::EnteredThisTurn {
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player: PlayerScope::Controller,
                                 filter: TargetFilter::Typed(filter),
                             },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 2 },
             } => {
-                assert_eq!(filter.controller, Some(ControllerRef::You));
+                // "under your control" is scoped by PlayerScope::Controller (the
+                // runtime keys on record.controller), so the type filter itself
+                // carries only the creature type, no controller.
                 assert!(filter.type_filters.contains(&TypeFilter::Creature));
             }
-            other => panic!("expected creatures EnteredThisTurn GE 2, got {other:?}"),
+            other => panic!("expected creatures BattlefieldEntriesThisTurn GE 2, got {other:?}"),
         }
     }
 
