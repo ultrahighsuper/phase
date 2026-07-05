@@ -714,6 +714,22 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     {
         drain_pending_repeat_until(state);
     }
+    // CR 614.12a + issue #4886 (review #4): the originating token-choice
+    // applied seed must outlive EVERY drain in this function — including
+    // `drain_pending_repeat_until`, which re-enters `resolve_ability_chain`
+    // (lines 721 / 744) and can emit further token proposals. Clearing before
+    // that drain (the previous bug) wiped the seed before a repeated token
+    // proposal, reopening the self-replacement loop. Clear ONLY at true
+    // full-drain: back at priority with no pending continuation, no pending
+    // repeat iteration, AND no pending repeat-until frame. By this point no
+    // ability is still resolving, so no token proposal can still need the seed.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.pending_continuation.is_none()
+        && state.pending_repeat_iteration.is_none()
+        && state.pending_repeat_until.is_none()
+    {
+        state.post_replacement_token_choice_applied = None;
+    }
 }
 
 /// CR 608.2c + CR 107.1c: Resume a "repeat this process" loop that paused when
