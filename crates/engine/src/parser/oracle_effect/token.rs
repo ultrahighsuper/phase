@@ -10,7 +10,7 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
     ContinuousModification, ControllerRef, Effect, FilterProp, ObjectScope, PtValue, QuantityExpr,
-    QuantityRef, StaticDefinition, TargetFilter,
+    QuantityRef, StaticDefinition, TargetFilter, TypeFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::keywords::Keyword;
@@ -21,7 +21,8 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, parse_static_line_multi};
 use super::super::oracle_target::{parse_target, parse_target_with_ctx};
 use super::super::oracle_util::{
-    normalize_card_name_refs, parse_count_expr, strip_reminder_text, TextPair,
+    normalize_card_name_refs, parse_count_expr, parse_rounding_suffix_only,
+    rewrite_quantity_expr_rounding, strip_reminder_text, TextPair,
 };
 use crate::parser::oracle_ir::ast::*;
 
@@ -328,6 +329,23 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     parse_token_description_with_context(text, &ParseContext::default())
 }
 
+/// True iff a `for each … this way` count restricts to a specific card type
+/// (Dread Summons' "creature card"), so it should override the unfiltered
+/// `TrackedSetSize`. A bare/generic "card" filter (e.g. "card discarded this
+/// way") is not restrictive and keeps `TrackedSetSize`.
+fn tracked_set_count_is_type_restricted(qty: &QuantityRef) -> bool {
+    let QuantityRef::FilteredTrackedSetSize { filter, .. } = qty else {
+        return false;
+    };
+    let TargetFilter::Typed(typed) = filter.as_ref() else {
+        return false;
+    };
+    typed
+        .type_filters
+        .iter()
+        .any(|type_filter| !matches!(type_filter, TypeFilter::Card))
+}
+
 fn parse_token_description_with_context(
     text: &str,
     ctx: &ParseContext,
@@ -486,6 +504,10 @@ fn parse_token_description_with_context(
     if is_all_colors {
         colors = ManaColor::ALL.to_vec();
     }
+    // CR 107.1a: Parse and apply standalone trailing rounding suffix.
+    if let Some(rounding) = parse_rounding_suffix_only(suffix) {
+        rewrite_quantity_expr_rounding(&mut count, rounding);
+    }
     let mut keywords = parse_token_keyword_clause(suffix);
     let (mut name, types) = parse_token_identity(descriptor, ctx.card_name.as_deref())?;
 
@@ -609,6 +631,18 @@ fn parse_token_description_with_context(
                     .ok()
                     .filter(|(rest, _)| rest.is_empty())
                     .map(|(_, qty)| QuantityExpr::Ref { qty })
+                    // CR 609.3 + CR 205.2a: a TYPE-restricted "for each <type> card
+                    // <verb> this way" (Dread Summons: "for each creature card put
+                    // into a graveyard this way") counts only the matching cards
+                    // moved this way — `FilteredTrackedSetSize` — not every card
+                    // moved (`TrackedSetSize`, which would create X tokens). Only a
+                    // restrictive type overrides; a bare/"card" filter keeps
+                    // `TrackedSetSize`.
+                    .or_else(|| {
+                        crate::parser::oracle_quantity::parse_for_each_clause(clause)
+                            .filter(tracked_set_count_is_type_restricted)
+                            .map(|qty| QuantityExpr::Ref { qty })
+                    })
                 })
                 .unwrap_or(QuantityExpr::Ref {
                     qty: QuantityRef::TrackedSetSize,
@@ -1356,6 +1390,33 @@ mod tests {
     }
 
     #[test]
+    fn for_each_creature_card_this_way_counts_only_creatures() {
+        // #4746 Dread Summons: "For each creature card put into a graveyard this
+        // way, you create a … token." The token count must restrict to CREATURE
+        // cards moved this way (`FilteredTrackedSetSize`), not every card
+        // (`TrackedSetSize`, which would create X tokens for X cards milled).
+        let txt = "Create a tapped 2/2 black Zombie creature token for each creature card put into a graveyard this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token { count, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let QuantityExpr::Ref {
+            qty: QuantityRef::FilteredTrackedSetSize { filter, .. },
+        } = &count
+        else {
+            panic!("expected FilteredTrackedSetSize (creature-restricted), got {count:?}");
+        };
+        assert!(
+            matches!(
+                filter.as_ref(),
+                TargetFilter::Typed(typed) if typed.type_filters == vec![TypeFilter::Creature]
+            ),
+            "count must restrict to creature cards milled, got {filter:?}"
+        );
+    }
+
+    #[test]
     fn copy_x_tokens_of_target_parses_variable_count() {
         // CR 707.2 + CR 107.3: variable X count in copy-token creation.
         let effect = try_parse_token(
@@ -1727,6 +1788,34 @@ mod tests {
                 }
             )
         ));
+    }
+
+    #[test]
+    fn token_count_half_x_rounding_after_token_noun_is_applied() {
+        let txt = "Create half X Food tokens, rounded up.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Food token effect");
+        let Effect::Token { name, count, .. } = effect else {
+            panic!("expected Token, got {effect:?}");
+        };
+        assert_eq!(name, "Food");
+        match count {
+            QuantityExpr::DivideRounded {
+                inner,
+                divisor,
+                rounding,
+            } => {
+                assert_eq!(divisor, 2);
+                assert_eq!(rounding, RoundingMode::Up);
+                assert!(matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name }
+                    } if name == "X"
+                ));
+            }
+            other => panic!("expected DivideRounded token count, got {other:?}"),
+        }
     }
 
     /// CR 109.4: `try_parse_token` emits the default `owner` of
