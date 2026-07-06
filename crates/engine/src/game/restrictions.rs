@@ -213,25 +213,53 @@ pub fn record_spell_cast(
     );
 }
 
-pub fn record_spell_cast_from_zone(
-    state: &mut crate::types::game_state::GameState,
-    player: PlayerId,
+/// CR 117.1 + CR 202.3d + CR 702.102b: The single authority for projecting a
+/// spell object into a [`SpellCastRecord`]. Every consumer — spell-cast history
+/// (`record_spell_cast_from_zone`), live cost-modifier / cast-prohibition filters
+/// (`spell_record_for_restrictions`, `spell_cast_record_from_object`), and
+/// per-turn cast-limit filters — routes through here so the spell's mana value and
+/// colors come from the split-aware `spell_mana_value`/`spell_colors` authority. A
+/// FUSED split spell therefore records the COMBINED value of both halves rather
+/// than its front half, so `Cmc`/`HasColor`/`ColorCount`/multicolored filters see
+/// the fused spell (CR 709.4d). `spell_mana_value` honors announced X on the stack
+/// for non-fused spells (CR 202.3e).
+pub(crate) fn spell_cast_record(
     obj: &GameObject,
     from_zone: Zone,
     cast_variant: crate::types::game_state::CastingVariant,
-) {
-    state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
-    *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
-    // CR 117.1: Record spell characteristics for general-purpose filtered counting.
-    let record = SpellCastRecord {
+) -> SpellCastRecord {
+    // CR 702.102b: A spell is fused when the persisted `fused_split_spell` marker
+    // is set (payment-time / on-stack casts) OR the caller is projecting a
+    // pre-payment `CastingVariant::Fuse` cast whose marker is not yet set (option
+    // enumeration / cast preparation on an immutable `&GameState`). Both must
+    // present the COMBINED characteristics of the two halves.
+    let fused = cast_variant == crate::types::game_state::CastingVariant::Fuse;
+    spell_cast_record_for(obj, from_zone, cast_variant, fused)
+}
+
+/// Fuse-aware sibling of [`spell_cast_record`]. `fused_hint` is the caller's
+/// pre-payment determination that the projected spell is a fused split spell
+/// (CR 702.102b), for seams that know the `CastingVariant::Fuse` intent before the
+/// `fused_split_spell` marker is set. The effective fused-ness is `fused_hint` OR
+/// the persisted marker, so a post-payment caller that passes `false` still gets
+/// the COMBINED projection once the marker is set — the OR-gate lives HERE (the
+/// single record authority) so every `_for` boundary is marker-safe and
+/// byte-identical for the pre-fix callers.
+pub(crate) fn spell_cast_record_for(
+    obj: &GameObject,
+    from_zone: Zone,
+    cast_variant: crate::types::game_state::CastingVariant,
+    fused_hint: bool,
+) -> SpellCastRecord {
+    let fused = fused_hint || obj.fused_split_spell;
+    SpellCastRecord {
         name: obj.name.clone(),
         core_types: obj.card_types.core_types.clone(),
         supertypes: obj.card_types.supertypes.clone(),
         subtypes: obj.card_types.subtypes.clone(),
         keywords: obj.keywords.clone(),
-        colors: obj.color.clone(),
-        // CR 202.3e: While on the stack, X equals the announced value, not 0.
-        mana_value: obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+        colors: obj.spell_colors_for(fused),
+        mana_value: obj.spell_mana_value_for(fused),
         // CR 107.3 + CR 601.2b: Capture X-in-cost at record time so later
         // trigger-filter evaluation (e.g. "your first spell with {X} in its
         // mana cost each turn") does not need to re-examine the spell object.
@@ -243,7 +271,20 @@ pub fn record_spell_cast_from_zone(
         cast_variant,
         // CR 702.33d: Kicker-paid state captured at cast time.
         was_kicked: !obj.kickers_paid.is_empty(),
-    };
+    }
+}
+
+pub fn record_spell_cast_from_zone(
+    state: &mut crate::types::game_state::GameState,
+    player: PlayerId,
+    obj: &GameObject,
+    from_zone: Zone,
+    cast_variant: crate::types::game_state::CastingVariant,
+) {
+    state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
+    *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
+    // CR 117.1: Record spell characteristics for general-purpose filtered counting.
+    let record = spell_cast_record(obj, from_zone, cast_variant);
     state
         .spells_cast_this_turn_by_player
         .entry(player)
@@ -1681,11 +1722,19 @@ pub(crate) fn triggering_spell_targets_filter(
 /// `cast_timing_permission == AsThoughHadFlash`) AND no flash permission's
 /// condition currently passes, the cast is illegal under CR 601.3d and must be
 /// aborted.
+/// `fused` projects the COMBINED characteristics of a pre-payment fused split
+/// spell (CR 702.102b) into the `has_real_flash` short-circuit so a value-keyed
+/// `CastWithKeyword{Flash}` grant (CR 702.8a) is seen for the fused spell. This
+/// re-validation runs before the `fused_split_spell` marker is set at
+/// `finalize_cast_with_phyrexian_choices`, so pre-payment fused callers pass
+/// `casting_variant == CastingVariant::Fuse`; all non-fused / single-face callers
+/// pass `false` (byte-identical to the pre-fix behavior).
 pub(crate) fn target_dependent_flash_permission_satisfied(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
     object_id: ObjectId,
     ability: &crate::types::ability::ResolvedAbility,
+    fused: bool,
 ) -> bool {
     use crate::types::ability::{ParsedCondition, SpellCastingOptionKind, TargetRef};
     let Some(obj) = state.objects.get(&object_id) else {
@@ -1695,8 +1744,9 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
     // authorizes instant-speed casting independent of any conditional flash
     // option. If the spell has Flash, the cast is legal regardless of any
     // `AsThoughHadFlash` option's condition.
-    let has_real_flash = super::casting::effective_spell_keyword_kinds(state, player, object_id)
-        .contains(&crate::types::keywords::KeywordKind::Flash);
+    let has_real_flash =
+        super::casting::effective_spell_keyword_kinds_for(state, player, object_id, fused)
+            .contains(&crate::types::keywords::KeywordKind::Flash);
     if has_real_flash {
         return true;
     }
@@ -1744,18 +1794,25 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
 /// FEASIBILITY check — distinct from the post-target SATISFACTION gate
 /// `target_dependent_flash_permission_satisfied`, which tests the player's
 /// already-chosen targets. CR 702.8a: a real Flash keyword bypasses entirely.
+/// `fused` projects a pre-payment fused split spell's COMBINED characteristics
+/// (CR 702.102b) into the `has_real_flash` short-circuit so a value-keyed
+/// `CastWithKeyword{Flash}` grant (CR 702.8a) is seen for the fused spell during
+/// candidate generation, before the `fused_split_spell` marker is set. Non-fused /
+/// single-face callers pass `false` (byte-identical to the pre-fix behavior).
 pub(crate) fn target_dependent_flash_permission_feasible(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
     object_id: ObjectId,
+    fused: bool,
 ) -> bool {
     use crate::types::ability::{SpellCastingOptionKind, TargetRef};
 
     // CR 702.8a: A real Flash keyword (printed or granted via continuous
     // effect) authorizes instant-speed casting independent of any conditional
     // flash option — short-circuit before any feasibility analysis.
-    let has_real_flash = super::casting::effective_spell_keyword_kinds(state, player, object_id)
-        .contains(&crate::types::keywords::KeywordKind::Flash);
+    let has_real_flash =
+        super::casting::effective_spell_keyword_kinds_for(state, player, object_id, fused)
+            .contains(&crate::types::keywords::KeywordKind::Flash);
     if has_real_flash {
         return true;
     }
@@ -3342,7 +3399,8 @@ mod tests {
                 &state,
                 caster,
                 ObjectId(10),
-                &ability_with_commander
+                &ability_with_commander,
+                false
             ),
             "casting at instant speed targeting a commander must satisfy the flash condition"
         );
@@ -3351,7 +3409,8 @@ mod tests {
                 &state,
                 caster,
                 ObjectId(10),
-                &ability_with_plain
+                &ability_with_plain,
+                false
             ),
             "casting at instant speed targeting a non-commander must FAIL the flash condition"
         );
@@ -3423,7 +3482,13 @@ mod tests {
             caster,
         );
         assert!(
-            target_dependent_flash_permission_satisfied(&state, caster, ObjectId(10), &ability),
+            target_dependent_flash_permission_satisfied(
+                &state,
+                caster,
+                ObjectId(10),
+                &ability,
+                false
+            ),
             "printed Flash keyword must short-circuit the target-dependent flash check"
         );
     }
@@ -3492,7 +3557,7 @@ mod tests {
             .push(CoreType::Creature);
 
         assert!(
-            !target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            !target_dependent_flash_permission_feasible(&state, caster, ObjectId(10), false),
             "no commander on the battlefield ⇒ the conditional flash cast is infeasible"
         );
 
@@ -3510,7 +3575,7 @@ mod tests {
             obj.is_commander = true;
         }
         assert!(
-            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10), false),
             "a commander creature on the battlefield ⇒ the conditional flash cast is feasible"
         );
     }
@@ -3576,7 +3641,7 @@ mod tests {
             .push(CoreType::Creature);
 
         assert!(
-            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10), false),
             "printed Flash must bypass the pre-target feasibility check (CR 702.8a)"
         );
     }
@@ -3622,7 +3687,7 @@ mod tests {
 
         // No commander, no targets at all — but the modal branch defers.
         assert!(
-            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10), false),
             "modal cards defer the feasibility verdict to the finalize-time gate"
         );
     }
@@ -3683,7 +3748,7 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         assert!(
-            !target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            !target_dependent_flash_permission_feasible(&state, caster, ObjectId(10), false),
             "Aura with only a non-commander enchantable target ⇒ infeasible"
         );
 
@@ -3702,7 +3767,7 @@ mod tests {
             obj.is_commander = true;
         }
         assert!(
-            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10), false),
             "Aura with a commander enchantable target ⇒ feasible"
         );
     }
