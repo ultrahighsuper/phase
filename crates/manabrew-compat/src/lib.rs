@@ -1649,6 +1649,9 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::ChooseRemoveCounterCostDistribution { .. } => {
             AvailableActionConversion::Unsupported("local.counter-cost-distribution-unsupported")
         }
+        GameAction::ChooseCountersToRemove { .. } => {
+            AvailableActionConversion::Unsupported("local.counter-removal-unsupported")
+        }
         GameAction::SelectCoinFlips { .. } => {
             AvailableActionConversion::Unsupported("local.coin-flip-unsupported")
         }
@@ -1763,7 +1766,8 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         }
         GameAction::SetAutoPass { .. }
         | GameAction::CancelAutoPass
-        | GameAction::SetPhaseStops { .. } => {
+        | GameAction::SetPhaseStops { .. }
+        | GameAction::SetPriorityYield { .. } => {
             AvailableActionConversion::Unsupported("local.autopass-settings-unsupported")
         }
         GameAction::AssignCombatDamage { .. } => AvailableActionConversion::Skip,
