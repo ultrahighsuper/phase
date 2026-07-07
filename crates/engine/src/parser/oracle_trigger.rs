@@ -12319,6 +12319,17 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 def.valid_target = Some(TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::Opponent),
                 ));
+            } else if scan_contains(who, "enchanted player") {
+                // CR 303.4m + CR 702.5a: "enchanted player" refers to whatever
+                // player this Aura is attached to (CR 303.4m); Enchant player
+                // (CR 702.5a) guarantees the source is attached to a player. So
+                // "Whenever enchanted player casts a [quality] spell" (Maddening
+                // Hex) scopes the caster to the enchanted player. `AttachedTo` —
+                // which `player_matches_filter` resolves to the source's attached
+                // player — fires the trigger only for that player's casts, not
+                // every player's. Without this the caster filter stays unset (any
+                // player).
+                def.valid_target = Some(TargetFilter::AttachedTo);
             }
 
             // Parse the spell quality generically (e.g., "creature spell", "multicolored spell")
