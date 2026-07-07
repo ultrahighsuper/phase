@@ -14904,6 +14904,61 @@ fn enchanted_permanent_is_colorless_forest_land_produces_set_basic_land_type() {
         .contains(&ContinuousModification::SetColor { colors: vec![] }));
 }
 
+// CR 205.1a / CR 205.1b (issue #5213 follow-up): distinct from #5231's land-only
+// coverage — the "it's a <type>" REPLACEMENT and its "in addition to" retention
+// exception are not land-specific. A bare non-land, non-creature type-set
+// ("~ is an artifact") must REPLACE the card types (SetCardTypes), while the same
+// type-set with the retention marker ("~ is an artifact in addition to its other
+// types") must stay ADDITIVE (AddType). Guards against a future change narrowing
+// `maybe_replace_card_types` back to the land case while leaving other
+// "it's a <type>" statics additive (or over-replacing the retention form).
+#[test]
+fn pronoun_is_a_noncreature_type_replacement_is_not_land_specific() {
+    // CR 205.1a: a non-land single non-creature type-set REPLACES.
+    let replace =
+        parse_static_line("~ is an artifact.").expect("\"~ is an artifact\" should parse");
+    assert!(
+        replace
+            .modifications
+            .contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![crate::types::card_type::CoreType::Artifact],
+            }),
+        "non-land \"is an artifact\" must REPLACE via SetCardTypes([Artifact]): {:?}",
+        replace.modifications
+    );
+    assert!(
+        !replace
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddType { .. })),
+        "non-land replacement must not stay additive: {:?}",
+        replace.modifications
+    );
+
+    // CR 205.1b: the "in addition to its other types" retention marker keeps the
+    // same non-land type-set additive (the non-land sibling of #5231's land
+    // retention case).
+    let retain = parse_static_line("~ is an artifact in addition to its other types.")
+        .expect("retention form should parse");
+    assert!(
+        retain
+            .modifications
+            .contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Artifact,
+            }),
+        "\"in addition to\" must stay additive (AddType(Artifact)): {:?}",
+        retain.modifications
+    );
+    assert!(
+        !retain
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "retention form must NOT replace card types: {:?}",
+        retain.modifications
+    );
+}
+
 // Issue #4770: Imprisoned in the Moon — "Enchanted permanent is a colorless land
 // with "{T}: Add {C}" and loses all other card types and abilities." Must become
 // a colorless land (SetCardTypes + SetColor), lose its own abilities
