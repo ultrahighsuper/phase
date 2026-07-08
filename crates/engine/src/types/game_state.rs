@@ -1889,6 +1889,18 @@ pub struct PendingCounterAdditionQueue {
     pub completion: Option<PendingEffectResolved>,
 }
 
+/// CR 701.12c + CR 119.7 + CR 119.8 + CR 616.1: Remaining deltas from a
+/// simultaneous life-total assignment that paused on a replacement choice. The
+/// current gain/loss event is owned by `pending_replacement`; this record holds
+/// only the tail plus the completion work that runs after the full assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingLifeTotalAssignment {
+    pub completion_player: PlayerId,
+    pub remaining: Vec<(PlayerId, i32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<PendingEffectResolved>,
+}
+
 /// CR 701.34a + CR 614.1a: Remaining proliferate actions after a replacement
 /// effect (Tekuthal class) doubles the count. Each completed `ProliferateChoice`
 /// drains one action; when `remaining` reaches zero the originating effect
@@ -3162,6 +3174,17 @@ pub enum TimeTravelPhase {
     Add,
 }
 
+/// CR 119.7 + CR 119.8: One legal outcome of a "redistribute any number of players' life
+/// totals" instruction — a complete assignment of a resulting life total to each
+/// participating player. Enumerated by the engine resolver (which filters
+/// CR 119.7 can't-gain / CR 119.8 can't-lose per receiver and dedupes
+/// behaviorally-identical outcomes); the frontend renders it and returns an
+/// index. `assignment[i] = (receiver, resulting_life)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifeRedistributionOption {
+    pub assignment: Vec<(PlayerId, i32)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -3472,6 +3495,14 @@ pub enum WaitingFor {
     ScryChoice {
         player: PlayerId,
         cards: Vec<ObjectId>,
+    },
+    /// CR 119.7 + CR 119.8: The controlling player redistributes participating players'
+    /// life totals (Reverse the Sands, The Doctor's Tomb). `options` is the
+    /// engine-enumerated set of legal assignments (identity always present); the
+    /// player submits `GameAction::SubmitLifeRedistribution { option_index }`.
+    RedistributeLifeTotals {
+        player: PlayerId,
+        options: Vec<LifeRedistributionOption>,
     },
     /// CR 705.1 + CR 614.1a: Krark's Thumb — the controller flipped `results.len()`
     /// coins for one logical flip and must ignore all but `keep_count`. `results[i]`
@@ -5004,6 +5035,7 @@ impl WaitingFor {
             WaitingFor::StationTarget { .. } => "StationTarget",
             WaitingFor::SaddleMount { .. } => "SaddleMount",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
@@ -5140,6 +5172,7 @@ impl WaitingFor {
             | WaitingFor::StationTarget { player, .. }
             | WaitingFor::SaddleMount { player, .. }
             | WaitingFor::ScryChoice { player, .. }
+            | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
             | WaitingFor::DigChoice { player, .. }
             | WaitingFor::SurveilChoice { player, .. }
@@ -6463,6 +6496,32 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_connive_reentry: Option<PendingConniveReentry>,
 
+    /// CR 121.6b: "If an effect replaces a draw within a sequence of card
+    /// draws, the replacement effect is completed before resuming the
+    /// sequence." Tracks an in-progress multi-card draw (`Effect::Draw{count:
+    /// N}`, N > 1) paused mid-way by a per-unit replacement choice (Dredge,
+    /// Notion Thief, Hullbreacher, etc.) so the remaining units resolve
+    /// independently instead of the whole count being replaced or drawn as
+    /// one atomic batch. `accumulated` (CR 609.3) is the running total of
+    /// cards ACTUALLY delivered across every already-completed unit of this
+    /// instruction — committed to `state.last_effect_count` exactly once,
+    /// when the full original count is exhausted, so chained "discard that
+    /// many" sub-abilities see the true total, not just the last unit's
+    /// count. Drained only by `engine_replacement::handle_replacement_choice`
+    /// (the `Draw` arm) and `replacement::abandon_post_replacement_continuation`
+    /// (player departure, CR 800.4a) — single-player-scoped, safe to null
+    /// outright on departure unlike the deliberately-preserved multi-player
+    /// queue fields (`pending_team_draw_step` etc.) nearby in `elimination.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_multi_draw: Option<PendingMultiDraw>,
+
+    /// CR 701.12c + CR 616.1: Tail of a life-total assignment that paused on a
+    /// gain/loss replacement choice. Drained by `handle_replacement_choice` after
+    /// the chosen replacement finishes, preserving the simultaneous snapshot's
+    /// remaining deltas across the prompt boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_life_total_assignment: Option<PendingLifeTotalAssignment>,
+
     /// Transient: post-resolution context for a permanent spell whose ETB replacement
     /// needs a player choice (NeedsChoice). Consumed by `handle_replacement_choice`
     /// after the zone change completes.
@@ -7689,6 +7748,15 @@ pub struct GameState {
     #[serde(skip)]
     pub last_dig_found_nothing: bool,
 
+    /// CR 609.3 + CR 608.2c: Set when the most recently resolved
+    /// `ChooseFromZone` had no card to choose. Like `last_dig_found_nothing`,
+    /// this is a transient relay consumed by the very next parent->child
+    /// hand-off and copied onto the child ability. It lets `ParentTarget`
+    /// consumers of the missing choice no-op without changing the shared
+    /// unresolved-anaphor fallback for unrelated effects.
+    #[serde(skip)]
+    pub last_choose_from_zone_found_nothing: bool,
+
     /// CR 701.20e: Cards the controller is privately "looking at" during the
     /// current resolution — the looker-scoped peek window of a bare
     /// "look at the top card of your library" (Dig with `keep_count == 0`,
@@ -8110,6 +8178,17 @@ pub struct PendingConniveReentry {
     pub conniver: ObjectId,
     pub count: u32,
     pub applied: HashSet<ReplacementId>,
+}
+
+/// CR 121.6b + CR 609.3: See the doc comment on `GameState::pending_multi_draw`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingMultiDraw {
+    pub player: PlayerId,
+    /// Units of the original multi-card draw not yet attempted.
+    pub remaining: u32,
+    /// Running total of cards actually delivered across every already-completed
+    /// unit — committed to `state.last_effect_count` once `remaining` reaches 0.
+    pub accumulated: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8565,6 +8644,8 @@ impl GameState {
             post_replacement_event_target: None,
             post_replacement_token_choice_applied: None,
             pending_connive_reentry: None,
+            pending_multi_draw: None,
+            pending_life_total_assignment: None,
             pending_spell_resolution: None,
             pending_mutate_merge: None,
             deferred_entry_events: Vec::new(),
@@ -8733,6 +8814,7 @@ impl GameState {
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
             last_dig_found_nothing: false,
+            last_choose_from_zone_found_nothing: false,
             private_look_ids: Vec::new(),
             private_look_player: None,
             last_zone_changed_ids: Vec::new(),
@@ -9231,6 +9313,8 @@ impl PartialEq for GameState {
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
             && self.pending_connive_reentry == other.pending_connive_reentry
+            && self.pending_multi_draw == other.pending_multi_draw
+            && self.pending_life_total_assignment == other.pending_life_total_assignment
             && self.pending_spell_resolution == other.pending_spell_resolution
             && self.deferred_entry_events == other.deferred_entry_events
             && self.layers_dirty == other.layers_dirty

@@ -170,11 +170,11 @@ fn find_legal_targets_with_context(
 
     // Check if filter could match players
     if matches!(filter, TargetFilter::Any | TargetFilter::Player) || is_any_other_target {
-        add_players(state, &mut targets, source_id);
+        add_players(state, &mut targets, source_id, source_controller);
     }
 
     if let TargetFilter::SpecificPlayer { id } = filter {
-        add_specific_player(state, &mut targets, *id, source_id);
+        add_specific_player(state, &mut targets, *id, source_id, source_controller);
         return targets;
     }
 
@@ -201,12 +201,13 @@ fn find_legal_targets_with_context(
                 if player.is_eliminated {
                     continue;
                 }
-                // CR 702.16b + CR 702.16j: A player with protection from the
-                // spell/ability's source can't be targeted by it.
-                if super::static_abilities::player_protection_from(
+                // CR 702.11c + CR 702.18a + CR 702.16b: Player-scope hexproof,
+                // shroud, and protection exclude illegal player targets.
+                if super::static_abilities::player_cannot_be_targeted_by(
                     state,
                     player.id,
-                    Some(source_id),
+                    source_id,
+                    source_controller,
                 ) {
                     continue;
                 }
@@ -1852,7 +1853,12 @@ fn filter_targets_stack_abilities(filter: &TargetFilter) -> bool {
     }
 }
 
-fn add_players(state: &GameState, targets: &mut Vec<TargetRef>, source_id: ObjectId) {
+fn add_players(
+    state: &GameState,
+    targets: &mut Vec<TargetRef>,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+) {
     // Player-phasing exclusion: a phased-out player is treated as though they
     // don't exist for targeting purposes (mirrors CR 702.26b for permanents,
     // applied to players via card Oracle text like "you phase out").
@@ -1867,9 +1873,14 @@ fn add_players(state: &GameState, targets: &mut Vec<TargetRef>, source_id: Objec
         if player.is_eliminated {
             continue;
         }
-        // CR 702.16b: A player with protection from the spell/ability's source
-        // can't be targeted by it.
-        if super::static_abilities::player_protection_from(state, player.id, Some(source_id)) {
+        // CR 702.11c + CR 702.18a + CR 702.16b: Player-scope hexproof, shroud,
+        // and protection exclude illegal player targets.
+        if super::static_abilities::player_cannot_be_targeted_by(
+            state,
+            player.id,
+            source_id,
+            source_controller,
+        ) {
             continue;
         }
         targets.push(TargetRef::Player(player.id));
@@ -1881,6 +1892,7 @@ fn add_specific_player(
     targets: &mut Vec<TargetRef>,
     player_id: PlayerId,
     source_id: ObjectId,
+    source_controller: PlayerId,
 ) {
     let Some(player) = state.players.iter().find(|player| player.id == player_id) else {
         return;
@@ -1888,7 +1900,12 @@ fn add_specific_player(
     if player.is_phased_out() || player.is_eliminated {
         return;
     }
-    if super::static_abilities::player_protection_from(state, player.id, Some(source_id)) {
+    if super::static_abilities::player_cannot_be_targeted_by(
+        state,
+        player.id,
+        source_id,
+        source_controller,
+    ) {
         return;
     }
     targets.push(TargetRef::Player(player.id));
@@ -4146,6 +4163,162 @@ mod tests {
         ));
     }
 
+    /// CR 702.11c: A player with hexproof (Crystal Barricade / Sigarda player
+    /// half) cannot be targeted by an opponent, but remains a legal target of
+    /// their own spells/abilities.
+    #[test]
+    fn find_legal_targets_excludes_player_hexproof_from_opponents() {
+        use crate::types::ability::{ControllerRef, StaticDefinition, TypedFilter};
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        // Sigarda-class grantor on P0 carries player-scope Hexproof.
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Hexproof Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let opponent_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Bolt".to_string(),
+            Zone::Battlefield,
+        );
+        let own_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Own Targeting Spell".to_string(),
+            Zone::Battlefield,
+        );
+
+        let opponent_targets =
+            find_legal_targets(&state, &TargetFilter::Any, PlayerId(1), opponent_source);
+        assert!(
+            !opponent_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "opponent must NOT be able to target a hexproof player, got {opponent_targets:?}"
+        );
+        assert!(
+            opponent_targets.contains(&TargetRef::Player(PlayerId(1))),
+            "opponent remains able to target themselves (no hexproof on P1)"
+        );
+
+        let own_targets = find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), own_source);
+        assert!(
+            own_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "controller may still target themselves despite having hexproof, got {own_targets:?}"
+        );
+    }
+
+    /// CR 702.11c: Typed "target opponent" enumeration must also exclude a
+    /// hexproof opponent (same branch as typed-player protection).
+    #[test]
+    fn find_legal_targets_typed_opponent_excludes_hexproof_player() {
+        use crate::types::ability::{ControllerRef, StaticDefinition, TypedFilter};
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Hexproof Player Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Target Opponent Spell".to_string(),
+            Zone::Battlefield,
+        );
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), source);
+        assert!(
+            !targets.contains(&TargetRef::Player(PlayerId(1))),
+            "hexproof opponent must be excluded from typed Opponent targets, got {targets:?}"
+        );
+        assert!(
+            targets.is_empty(),
+            "no other opponent exists: expected empty, got {targets:?}"
+        );
+    }
+
+    /// CR 702.18a: Player shroud blocks targeting by **every** player, including
+    /// the shrouded player's own spells — stricter than hexproof.
+    #[test]
+    fn find_legal_targets_excludes_player_shroud_from_all_sources() {
+        use crate::types::ability::{ControllerRef, StaticDefinition, TypedFilter};
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Shroud Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Shroud).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let opponent_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Bolt".to_string(),
+            Zone::Battlefield,
+        );
+        let own_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Own Targeting Spell".to_string(),
+            Zone::Battlefield,
+        );
+
+        let opponent_targets =
+            find_legal_targets(&state, &TargetFilter::Any, PlayerId(1), opponent_source);
+        assert!(
+            !opponent_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "opponent must not target a shrouded player, got {opponent_targets:?}"
+        );
+
+        let own_targets = find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), own_source);
+        assert!(
+            !own_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "player shroud also blocks the player's own targeting, got {own_targets:?}"
+        );
+    }
+
     /// CR 702.16b + CR 702.16j: A player with protection from everything
     /// cannot be a legal target of any spell or ability from any source.
     /// `find_legal_targets` must exclude that player from the "any target"
@@ -4252,6 +4425,63 @@ mod tests {
         );
         assert!(targets.contains(&TargetRef::Player(PlayerId(2))));
         assert!(targets.contains(&TargetRef::Player(PlayerId(3))));
+    }
+
+    /// CR 702.11c + CR 102.2 / CR 102.3: Player hexproof must not exclude a
+    /// 2HG teammate source from targeting the protected player, while still
+    /// blocking an opposing-team source.
+    #[test]
+    fn find_legal_targets_player_hexproof_allows_2hg_teammate_blocks_opposing() {
+        use crate::types::ability::{ControllerRef, StaticDefinition, TypedFilter};
+        use crate::types::format::FormatConfig;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        // Seats: P0+P1 one team, P2+P3 the other. Hexproof on P0.
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Hexproof".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let teammate_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Teammate Source".to_string(),
+            Zone::Battlefield,
+        );
+        let opposing_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(2),
+            "Opposing Team Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let teammate_targets =
+            find_legal_targets(&state, &TargetFilter::Any, PlayerId(1), teammate_source);
+        assert!(
+            teammate_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "2HG teammate must still be able to target the hexproof player, got {teammate_targets:?}"
+        );
+
+        let opposing_targets =
+            find_legal_targets(&state, &TargetFilter::Any, PlayerId(2), opposing_source);
+        assert!(
+            !opposing_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "opposing-team source must not target the hexproof player, got {opposing_targets:?}"
+        );
     }
 
     fn make_resolved_with_targets(

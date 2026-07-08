@@ -181,7 +181,10 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
                 ..
             } => false,
             CastingPermission::PlayFromExile {
-                duration: Duration::UntilNextTurnOf { .. } | Duration::Permanent,
+                duration:
+                    Duration::UntilNextTurnOf { .. }
+                    | Duration::UntilSourceExilesAnotherCard
+                    | Duration::Permanent,
                 ..
             } => true,
             // CR 513.1: `UntilNextStepOf { step: End }` is expired by
@@ -3094,13 +3097,42 @@ pub(crate) fn active_continuous_effects_from_base_static_source(
     state: &GameState,
     source: &crate::game::game_object::GameObject,
 ) -> Vec<ActiveContinuousEffect> {
+    let static_definitions: Vec<StaticDefinition> = source
+        .base_static_definitions
+        .iter()
+        .filter(|def| base_static_can_source_off_zone_keyword_query(def, source.zone))
+        .cloned()
+        .collect();
     active_continuous_effects_from_static_definitions(
         state,
         source.id,
         source.controller,
         source.timestamp,
-        &source.base_static_definitions,
+        &static_definitions,
     )
+}
+
+fn base_static_can_source_off_zone_keyword_query(
+    def: &StaticDefinition,
+    source_zone: Zone,
+) -> bool {
+    matches!(def.affected.as_ref(), Some(TargetFilter::SelfRef))
+        || def.active_zones.contains(&source_zone)
+        || def
+            .condition
+            .as_ref()
+            .is_some_and(static_condition_has_source_zone_gate)
+}
+
+fn static_condition_has_source_zone_gate(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::SourceInZone { .. } => true,
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            conditions.iter().any(static_condition_has_source_zone_gate)
+        }
+        StaticCondition::Not { condition } => static_condition_has_source_zone_gate(condition),
+        _ => false,
+    }
 }
 
 fn active_continuous_effects_from_static_definitions(
@@ -5516,6 +5548,49 @@ mod tests {
         obj.base_toughness = Some(toughness);
         obj.timestamp = ts;
         id
+    }
+
+    /// CR 608.2c: The player-control superlative gate evaluates at
+    /// resolution across all creatures on the battlefield.
+    #[test]
+    fn you_control_creature_tied_for_greatest_toughness_condition_evaluates_table_wide() {
+        use crate::parser::oracle_nom::condition::parse_inner_condition;
+
+        let (rest, condition) = parse_inner_condition(
+            "you control the creature with the greatest toughness or tied for the greatest toughness.",
+        )
+        .expect("Abzan Beastmaster condition should parse");
+        assert!(
+            rest.is_empty(),
+            "condition must fully consume, leftover: {rest:?}"
+        );
+
+        let mut state = setup();
+        let source = make_creature(&mut state, "Abzan Beastmaster", 2, 1, PlayerId(0));
+        make_creature(&mut state, "Controlled Bear", 2, 2, PlayerId(0));
+        make_creature(&mut state, "Opponent Wall", 0, 5, PlayerId(1));
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !evaluate_condition_for_test(&state, &condition, PlayerId(0), source),
+            "condition should be false when only an opponent controls the greatest toughness"
+        );
+
+        make_creature(&mut state, "Controlled Wall", 0, 5, PlayerId(0));
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            evaluate_condition_for_test(&state, &condition, PlayerId(0), source),
+            "condition should be true when you control a creature tied for greatest toughness"
+        );
+
+        make_creature(&mut state, "Opponent Colossus", 0, 6, PlayerId(1));
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !evaluate_condition_for_test(&state, &condition, PlayerId(0), source),
+            "condition should become false when an opponent controls the sole greatest toughness"
+        );
     }
 
     #[test]
@@ -12735,6 +12810,7 @@ mod tests {
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                invalidation: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
@@ -12764,6 +12840,7 @@ mod tests {
             granted_to: PlayerId(0),
             frequency: crate::types::statics::CastFrequency::Unlimited,
             source_id: None,
+            invalidation: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
             card_filter: None,
@@ -12777,6 +12854,7 @@ mod tests {
             granted_to: PlayerId(0),
             frequency: crate::types::statics::CastFrequency::Unlimited,
             source_id: None,
+            invalidation: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
             card_filter: None,
@@ -12818,6 +12896,7 @@ mod tests {
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                invalidation: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
@@ -12908,6 +12987,7 @@ mod tests {
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                invalidation: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
@@ -12928,6 +13008,7 @@ mod tests {
                 granted_to: PlayerId(1),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                invalidation: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
@@ -12965,6 +13046,7 @@ mod tests {
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                invalidation: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,

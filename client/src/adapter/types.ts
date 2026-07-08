@@ -214,6 +214,41 @@ export interface MatchScore {
   draws: number;
 }
 
+/** Name-only per-player deck list, mirroring the engine's `PlayerDeckList`. */
+export interface ReplayPlayerDeckList {
+  main_deck: string[];
+  sideboard: string[];
+  commander: string[];
+  planar_deck: string[];
+  scheme_deck: string[];
+  contraption_deck: string[];
+  sticker_sheets: string[];
+  signature_spell: string[];
+  bracket_tier: string;
+}
+
+/** Mirrors the engine's `DeckList` — the name-only deck payload `initializeGame` accepts. */
+export interface ReplayDeckList {
+  player: ReplayPlayerDeckList;
+  opponent: ReplayPlayerDeckList;
+  ai_decks: ReplayPlayerDeckList[];
+  ai_difficulties: string[];
+}
+
+/**
+ * Everything needed to reconstruct a recorded game's starting state — the
+ * non-action-sequence half of a replay recording. Mirrors the engine's
+ * `ReplayHeader` (`crates/engine/src/types/replay.rs`).
+ */
+export interface ReplayHeader {
+  format_config: FormatConfig;
+  match_config: MatchConfig;
+  player_count: number;
+  first_player: number | null;
+  seed: number;
+  deck_data: ReplayDeckList | null;
+}
+
 export interface DeckCardCount {
   name: string;
   count: number;
@@ -1276,6 +1311,7 @@ export type WaitingFor =
   | { type: "StationTarget"; data: { player: PlayerId; spacecraft_id: ObjectId; eligible_creatures: ObjectId[] } }
   | { type: "SaddleMount"; data: { player: PlayerId; mount_id: ObjectId; saddle_power: number; eligible_creatures: ObjectId[]; contributions?: number[] } }
   | { type: "ScryChoice"; data: { player: PlayerId; cards: ObjectId[] } }
+  | { type: "RedistributeLifeTotals"; data: { player: PlayerId; options: { assignment: [PlayerId, number][] }[] } }
   | { type: "CoinFlipKeepChoice"; data: { player: PlayerId; results: boolean[]; keep_count: number } }
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
@@ -1764,6 +1800,7 @@ export type GameAction =
   | { type: "SubmitPilePartition"; data: { pile_a: ObjectId[] } }
   | { type: "ChoosePile"; data: { pile: PileSide } }
   | { type: "ChooseBranch"; data: { index: number } }
+  | { type: "SubmitLifeRedistribution"; data: { option_index: number } }
   | { type: "ChooseDamageSource"; data: { source: ObjectId } }
   | { type: "SelectModes"; data: { indices: number[] } }
   | { type: "DecideOptionalCost"; data: { pay: boolean } }
