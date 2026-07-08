@@ -17,9 +17,9 @@ use engine::types::game_state::CastPaymentMode;
 /// Classify a decision into the bucket the policy registry uses for routing.
 pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
     match waiting_for {
-        WaitingFor::MulliganDecision { .. }
-        | WaitingFor::MulliganBottomCards { .. }
-        | WaitingFor::OpeningHandBottomCards { .. } => DecisionKind::Mulligan,
+        WaitingFor::MulliganDecision { .. } | WaitingFor::OpeningHandBottomCards { .. } => {
+            DecisionKind::Mulligan
+        }
         WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. } => {
             DecisionKind::ManaPayment
         }
@@ -97,6 +97,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
         | WaitingFor::NamedChoice { .. }
+        | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
         | WaitingFor::ModeChoice { .. }
         | WaitingFor::DiscardToHandSize { .. }
@@ -158,6 +159,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::AssistPayment { .. }
         | WaitingFor::ChooseObjectsSelection { .. }
         | WaitingFor::CategoryChoice { .. }
+        | WaitingFor::EachPlayerCopyChosenSelection { .. }
         | WaitingFor::KeepWithinTotalPowerChoice { .. }
         | WaitingFor::AssignCombatDamage { .. }
         // CR 510.1d + CR 702.22k: active player divides a banded blocker's
@@ -210,6 +212,7 @@ mod tests {
                     pending: vec![engine::types::game_state::MulliganDecisionEntry {
                         player: PlayerId(0),
                         mulligan_count: 0,
+                        phase: engine::types::game_state::MulliganDecisionPhase::Declare,
                     }],
                     free_first_mulligan: false,
                 },

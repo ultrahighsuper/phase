@@ -87,15 +87,23 @@ pub(crate) fn handle_select_modes(
     // costs layered on top of the base cost. `restrictions::add_mana_cost` treats `NoCost`/
     // zero as identity, so a cast-without-paying path (`pending.cost == zero`) yields exactly
     // the additional costs — alternative-cost permissions never waive them.
-    let total_cost = compute_modal_total_cost(&pending.cost, &modal, &indices);
+    let mut total_cost = compute_modal_total_cost(&pending.cost, &modal, &indices);
     let mut pending = pending;
     // CR 601.2b + CR 601.2f: Fold the chosen modal mode costs (Spree / Entwine
-    // cost increases, computed against a zero base) into the captured base so
-    // any later post-X cost recompute (`concrete_cost_for_x`) includes them.
-    // Without a captured base (legacy / activated) leave it `None`.
-    if let Some(base) = pending.base_cost.as_ref() {
+    // cost increases, computed against a zero base) into the declared mana
+    // additions so any later pending recompute includes them without rewriting
+    // the tax-inclusive base.
+    if pending.base_cost.is_some() {
         let modal_only = compute_modal_total_cost(&ManaCost::zero(), &modal, &indices);
-        pending.base_cost = Some(restrictions::add_mana_cost(base, &modal_only));
+        if !modal_only.is_without_paying_mana() {
+            pending.declared_mana_additions.push(modal_only);
+            total_cost = super::casting::recompute_pending_mana_total(
+                state,
+                controller,
+                &pending,
+                pending.ability.chosen_x,
+            );
+        }
     }
     if let Some(cost) = escalate_cost_for_selected_modes(state, controller, &pending, indices.len())
     {
@@ -121,6 +129,7 @@ pub(crate) fn handle_select_modes(
         let mut pending_x =
             PendingCast::new(pending.object_id, pending.card_id, resolved, total_cost);
         pending_x.base_cost = pending.base_cost.clone();
+        pending_x.declared_mana_additions = pending.declared_mana_additions.clone();
         pending_x.target_constraints = pending.target_constraints;
         pending_x.casting_variant = pending.casting_variant;
         pending_x.cast_timing_permission = pending.cast_timing_permission;
@@ -196,6 +205,7 @@ pub(crate) fn handle_select_modes(
         let mut pending_sel =
             PendingCast::new(pending.object_id, pending.card_id, resolved, total_cost);
         pending_sel.base_cost = pending.base_cost.clone();
+        pending_sel.declared_mana_additions = pending.declared_mana_additions.clone();
         pending_sel.target_constraints = pending.target_constraints;
         pending_sel.casting_variant = pending.casting_variant;
         pending_sel.origin_zone = pending.origin_zone;
@@ -515,6 +525,21 @@ fn pay_activation_costs_after_target_selection(
     }
 
     if let Some(ref activation_cost) = pending.activation_cost {
+        // CR 107.4f + GH #600: Target-first activations store the full cost in
+        // `activation_cost` with `pending.cost = NoCost`; route through the same
+        // Phyrexian pause helper as the no-target activation path.
+        if let Some(waiting) = super::casting::try_pause_activation_phyrexian_payment(
+            state,
+            player,
+            pending.object_id,
+            ability_index,
+            &assigned_ability,
+            activation_cost,
+            events,
+        ) {
+            return Ok(Some(waiting));
+        }
+
         if let Some((count, zone, filter)) = super::casting::find_non_self_exile(activation_cost) {
             let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
                 .expect("find_non_self_exile restricts zone to Hand or Graveyard");
@@ -622,6 +647,12 @@ fn escalate_cost_for_selected_modes(
         return None;
     }
 
+    // CR 702.120a + CR 702.102b: Reads the spell's own Escalate keyword. Left on the
+    // marker-default (non-fuse-aware) `effective_spell_keywords` deliberately: no
+    // real split card carries Escalate, and the only fuse-sensitive input is a
+    // `CastWithKeyword` `affected` filter keyed on the combined mana value / colors
+    // — a class that does not arise for Escalate. If a fused split spell were ever
+    // granted Escalate by a value-keyed static, this would need the `_for` variant.
     let cost = super::casting::effective_spell_keywords(state, player, pending.object_id)
         .into_iter()
         .find_map(|keyword| match keyword {

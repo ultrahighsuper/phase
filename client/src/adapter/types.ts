@@ -628,6 +628,15 @@ export interface TokenImageRef {
   preset_id: string;
 }
 
+export type TokenPtProvenance =
+  | "FixedOrAbsent"
+  | {
+      SourceDefinedOrDynamic: {
+        power?: string | null;
+        toughness?: string | null;
+      };
+    };
+
 // ── CR 701.57a + CR 702.85a: Cast/decline choice for Discover and Cascade ──
 
 export type CastChoice = { type: "Cast" } | { type: "Decline" };
@@ -655,19 +664,41 @@ export type CastingPermission =
 
 // ── Game Restriction ────────────────────────────────────────────────────
 
-export type RestrictionExpiry = { type: "EndOfTurn" } | { type: "EndOfCombat" };
+export type RestrictionExpiry =
+  | { type: "EndOfTurn" }
+  | { type: "EndOfCombat" }
+  | { type: "UntilPlayerNextTurn"; player: PlayerId }
+  | { type: "UntilEndOfNextTurnOf"; player: PlayerId };
 
 export type RestrictionScope =
   | { type: "SourcesControlledBy"; data: PlayerId }
   | { type: "SpecificSource"; data: ObjectId }
   | { type: "DamageToTarget"; data: ObjectId };
 
-export type GameRestriction = {
-  type: "DamagePreventionDisabled";
-  source: ObjectId;
-  expiry: RestrictionExpiry;
-  scope?: RestrictionScope | null;
-};
+export type GameRestriction =
+  | {
+      type: "DamagePreventionDisabled";
+      source: ObjectId;
+      expiry: RestrictionExpiry;
+      scope?: RestrictionScope | null;
+    }
+  | {
+      // CR 101.2 + CR 601.2a: player-scoped activity prohibition. Mirrored
+      // loosely — the display layer never inspects the nested activity axis.
+      type: "ProhibitActivity";
+      source: ObjectId;
+      affected_players: Record<string, unknown>;
+      expiry: RestrictionExpiry;
+      activity: Record<string, unknown>;
+    }
+  | {
+      // CR 611.2a + CR 614.1d: floating "cards can't enter the battlefield from
+      // <zone>" restriction (Bad Wolf Bay). Mirrors the engine variant.
+      type: "CantEnterBattlefieldFrom";
+      source: ObjectId;
+      expiry: RestrictionExpiry;
+      filter: TargetFilter;
+    };
 
 export interface SerializedManaProduction {
   type: string;
@@ -1037,6 +1068,7 @@ export interface TriggerContextDisplay {
 
 export interface StackEntryDisplay {
   source_name: string;
+  token_image_ref?: TokenImageRef | null;
   kind_label: string;
   ability_description?: string;
   targets?: StackTargetDisplay[];
@@ -1188,19 +1220,28 @@ export type CastOfferKind =
       exile_instead_of_graveyard?: boolean;
     };
 
+// CR 103.5b: Which declare-point action a pending BottomCards obligation
+// completes once resolved. Field-flattened under `type` (no `data:` wrapper) to
+// mirror the Rust `#[serde(tag = "type")]` no-content shape — intentionally
+// different from MulliganChoice's TS shape (which nests under `data:`).
+export type PendingMulliganAction =
+  | { type: "Keep" }
+  | { type: "UseSerumPowder"; object_id: ObjectId };
+
+// CR 103.5 + 103.5b: Per-entry sub-state for the declare-point mulligan flow.
+export type MulliganDecisionPhase =
+  | { type: "Declare" }
+  | { type: "BottomCards"; count: number; then: PendingMulliganAction };
+
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: SerializedAbilityCost[]; pending_cast: PendingCast } }
   | {
       type: "MulliganDecision";
       data: {
-        pending: { player: PlayerId; mulligan_count: number }[];
+        pending: { player: PlayerId; mulligan_count: number; phase: MulliganDecisionPhase }[];
         free_first_mulligan: boolean;
       };
-    }
-  | {
-      type: "MulliganBottomCards";
-      data: { pending: { player: PlayerId; count: number }[] };
     }
   | {
       type: "OpeningHandBottomCards";
@@ -1231,9 +1272,9 @@ export type WaitingFor =
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
   | { type: "ReturnAsAuraTarget"; data: { player: PlayerId; source_id: ObjectId; returned_id: ObjectId; legal_targets: TargetRef[]; pending_effect: unknown } }
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
-  | { type: "CrewVehicle"; data: { player: PlayerId; vehicle_id: ObjectId; crew_power: number; eligible_creatures: ObjectId[] } }
+  | { type: "CrewVehicle"; data: { player: PlayerId; vehicle_id: ObjectId; crew_power: number; eligible_creatures: ObjectId[]; contributions?: number[] } }
   | { type: "StationTarget"; data: { player: PlayerId; spacecraft_id: ObjectId; eligible_creatures: ObjectId[] } }
-  | { type: "SaddleMount"; data: { player: PlayerId; mount_id: ObjectId; saddle_power: number; eligible_creatures: ObjectId[] } }
+  | { type: "SaddleMount"; data: { player: PlayerId; mount_id: ObjectId; saddle_power: number; eligible_creatures: ObjectId[]; contributions?: number[] } }
   | { type: "ScryChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "CoinFlipKeepChoice"; data: { player: PlayerId; results: boolean[]; keep_count: number } }
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
@@ -1247,6 +1288,7 @@ export type WaitingFor =
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source_id?: ObjectId } }
+  | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source_id: ObjectId; proposition_truth?: boolean } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast; unavailable_modes?: number[] } }
@@ -1261,7 +1303,7 @@ export type WaitingFor =
   // `keyword.type` mirrors engine `AlternativeCastKeyword` (game_state.rs) 1:1.
   // Keep this union exhaustive with the engine enum so the modal's keyword
   // switch is type-checked against every variant the engine can emit.
-  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Emerge" } | { type: "Dash" } | { type: "Blitz" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Impending" } | { type: "Prototype" } | { type: "Mutate" } | { type: "Spectacle" } | { type: "Prowl" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
+  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Emerge" } | { type: "Dash" } | { type: "Blitz" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Impending" } | { type: "Prototype" } | { type: "Mutate" } | { type: "Spectacle" } | { type: "Prowl" } | { type: "FaceDown" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
   // CR 702.140c + CR 730.2a: mutating creature spell resolving with a legal
   // target — controller chooses to put it on top of or under the target creature.
   | { type: "MutateMergeChoice"; data: { player: PlayerId; merging_id: ObjectId; target_id: ObjectId } }
@@ -1426,6 +1468,21 @@ export type WaitingFor =
       all_kept: ObjectId[];
       scoped_players: PlayerId[];
     } }
+  | { type: "EachPlayerCopyChosenSelection"; data: {
+      player: PlayerId;
+      eligible: TargetRef[];
+      min: number;
+      max: number;
+      choose_filter: TargetFilter;
+      copy_modifications?: unknown[];
+      scale?: unknown;
+      source_id: ObjectId;
+      source_controller: PlayerId;
+      remaining_players: PlayerId[];
+      all_choices: { player: PlayerId; chosen: ObjectId[] }[];
+      scoped_players: PlayerId[];
+      trigger_event?: GameEvent;
+    } }
   // CR 107.1c + CR 701.21a (Slaughter the Strong): keep any number of eligible
   // creatures whose combined power is at most `cap`; the rest are sacrificed.
   | { type: "KeepWithinTotalPowerChoice"; data: {
@@ -1566,6 +1623,8 @@ export type DebugTokenRequest =
       data: {
         preset_id: string;
         owner: PlayerId;
+        power_override?: number | null;
+        toughness_override?: number | null;
         enter_with_counters?: [CounterType, number][];
       };
     }
@@ -1639,8 +1698,17 @@ export type DebugAction =
 export type YieldScope = "ThisObject" | "AllCopies";
 
 export type YieldTarget =
-  | { ThisObject: { source_id: ObjectId; incarnation: number } }
-  | { AllCopies: { card_id: CardId } };
+  | {
+      ThisObject: {
+        source_id: ObjectId;
+        // `null` for synthetic/delayed triggers that never latched an incarnation.
+        incarnation: number | null;
+        // Absent/`null` = source-level wildcard (legacy/coarse yields); a value
+        // scopes the yield to one of a source's distinct triggers.
+        trigger_description?: string | null;
+      };
+    }
+  | { AllCopies: { card_id: CardId; trigger_description?: string | null } };
 
 export type PriorityYieldOp =
   | { type: "Add"; data: { source_id: ObjectId; scope: YieldScope } }
@@ -1859,6 +1927,7 @@ export type GameEvent =
   | { type: "TokenCreated"; data: { object_id: ObjectId; name: string; source_id: ObjectId } }
   | { type: "CreatureDestroyed"; data: { object_id: ObjectId } }
   | { type: "PermanentSacrificed"; data: { object_id: ObjectId; player_id: PlayerId } }
+  | { type: "ArmyAmassed"; data: { object_id: ObjectId; source_id: ObjectId; controller: PlayerId } }
   | { type: "EffectResolved"; data: { kind: string; source_id: ObjectId } }
   | { type: "AttackersDeclared"; data: { attacker_ids: ObjectId[]; defending_player: PlayerId; attacks?: [ObjectId, AttackTarget][] } }
   | { type: "BlockersDeclared"; data: { assignments: [ObjectId, ObjectId][] } }
@@ -1890,6 +1959,7 @@ export type GameEvent =
   | { type: "BecomesPlotted"; data: { object_id: ObjectId; player_id: PlayerId } }
   | { type: "DungeonCompleted"; data: { player_id: PlayerId; dungeon: DungeonId } }
   | { type: "InitiativeTaken"; data: { player_id: PlayerId } }
+  | { type: "CardPredicateGuessMade"; data: { player_id: PlayerId; source_id: ObjectId | null; choice: string } }
   | { type: "DebugActionUsed"; data: { player_id: PlayerId; description: string } }
   | { type: "DebugPermissionGranted"; data: { host: PlayerId; player_id: PlayerId } }
   | { type: "DebugPermissionRevoked"; data: { host: PlayerId; player_id: PlayerId } }
@@ -2041,6 +2111,13 @@ export interface UnboundedResourceView {
   axis: ResourceAxis;
 }
 
+/** Mirrors `engine::game::derived_views::TurnOrderSlotView`. */
+export interface TurnOrderSlotView {
+  player: PlayerId;
+  slot_index: number;
+  turns_from_now: number;
+}
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -2100,6 +2177,11 @@ export interface DerivedViews {
   planechase?: PlanechaseView | null;
   /** Engine-authored Archenemy state. */
   archenemy?: ArchenemyView | null;
+  /**
+   * Engine-authored multiplayer turn-order rows. Duplicate players are
+   * intentional when extra turns put the same player in multiple slots.
+   */
+  turn_order?: TurnOrderSlotView[];
   /**
    * CR 732.2a: `∞` HUD rows — one per (engine-attributed player, pumped axis)
    * of every unbounded-resource loop. Empty/omitted when no loop is active. The

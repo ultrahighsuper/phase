@@ -1370,7 +1370,13 @@ fn try_parse_subject_restriction_clause(
     // creature gets -3/-0 and its activated abilities can't be activated"), so they
     // bind to `ParentTarget`; `parse_subject_application` resolves the typed-subject
     // forms ("target creature's", "each creature you control").
-    if let Some((before, _)) = tp.split_around(" activated abilities can't be activated") {
+    // CR 605.1a: split on the predicate with either apostrophe glyph so a U+2019
+    // effect clause ("target creature's activated abilities can't be activated
+    // unless they're mana abilities") still reaches the shared exemption scan.
+    if let Some((before, _)) = tp
+        .split_around(" activated abilities can't be activated")
+        .or_else(|| tp.split_around(" activated abilities can\u{2019}t be activated"))
+    {
         let subject = before.original.trim();
         let application = subject_application_for_cant_be_activated(subject, ctx)?;
         let affected = static_affected_for_application(&application);
@@ -2921,13 +2927,47 @@ fn try_split_pump_compound(
 
 fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Option<Duration>)> {
     let lower = predicate.to_lowercase();
-    let (choice_text, _) = tag::<_, _, OracleError<'_>>("gain your choice of ")
-        .parse(lower.as_str())
-        .ok()?;
-    let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
-    let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
-    let first = parse_keyword_from_oracle(left.trim())?;
-    let second = parse_keyword_from_oracle(right.trim())?;
+
+    // Shape 1: "gain your choice of X or Y" — an explicit keyword-grant menu.
+    if let Ok((choice_text, _)) =
+        tag::<_, _, OracleError<'_>>("gain your choice of ").parse(lower.as_str())
+    {
+        let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
+        let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
+        let first = parse_keyword_from_oracle(left.trim())?;
+        let second = parse_keyword_from_oracle(right.trim())?;
+        return Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))));
+    }
+
+    // Shape 2: "gain/have protection from X or from the color of your choice"
+    // (Angelic Intervention, Apostle's Blessing, Giver of Runes, Jeweled Spirit,
+    // Razor Barrier). The predicate arrives DECONJUGATED (gains→gain, has→have),
+    // so anchor on the bare forms — never "gains"/"has".
+    // CR 608.2d: a choice offered by a resolving ability is announced as the
+    // effect is applied (choose one protection).
+    // CR 702.16a: protection from [quality] (color, colorless, or card type).
+    let (remainder, _) = alt((
+        tag::<_, _, OracleError<'_>>("gain protection from "),
+        tag("have protection from "),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let (quality_text, duration) = super::strip_trailing_duration(remainder);
+    // GUARDRAIL: split on the literal " or from " (NOT " or "). Splitting on
+    // " or " would leave the right half as "from the color of your choice",
+    // which parse_protection_target's `from `-prefix arm routes to Quality —
+    // silently killing the color choice. When there is no " or from " this is a
+    // single protection grant, so return None and fall through to the existing
+    // continuous-clause behavior.
+    let (_, (left, right)) =
+        nom_primitives::split_once_on(quality_text.trim(), " or from ").ok()?;
+    // The halves are bare qualities (the "protection from " prefix is already
+    // stripped), so map each with parse_protection_target — NOT
+    // parse_keyword_from_oracle, which expects the full "protection from …" form.
+    let first = Keyword::Protection(crate::types::keywords::parse_protection_target(left.trim()));
+    let second = Keyword::Protection(crate::types::keywords::parse_protection_target(
+        right.trim(),
+    ));
     Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))))
 }
 
@@ -5155,6 +5195,44 @@ pub(super) fn strip_subject_clause(text: &str) -> Option<String> {
     }
 
     Some(deconjugate_verb(predicate))
+}
+
+/// Strip a leading *controller* subject ("you may " / "you ") from `text`,
+/// returning the imperative remainder in original case; `None` for every other
+/// leading subject.
+///
+/// This is the controller-only counterpart to [`strip_subject_clause`]. It
+/// exists for the token "create … for each X" fallback in
+/// `oracle_effect/mod.rs`, which delegates to `token::try_parse_token`. That
+/// path defaults `Effect::Token.owner` to `TargetFilter::Controller`
+/// (CR 109.5: an unqualified "you" is the controller of the source) and — via
+/// the early return in `try_parse_for_each_effect` — does NOT run the
+/// subject→owner rebinding that the numeric/targeted for-each arms use. So
+/// stripping a *non-controller* subject there ("each player", "each opponent",
+/// "target player/opponent", "its controller", "that player", …) would
+/// silently mis-own the created token to the source controller
+/// (CR 111.11: a token is created under a specific player's control). Only the
+/// controller subject may be stripped in that fallback; any other leading
+/// subject returns `None` so the clause honestly falls through to unsupported.
+pub(super) fn strip_controller_subject_clause(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    // Longest-match first: "you may " before the bare "you " so the optional
+    // permission word is consumed rather than stranded on the remainder.
+    let ((), remainder) = nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("you may "),
+                tag::<_, _, OracleError<'_>>("you "),
+            )),
+        )
+        .parse(i)
+    })?;
+    let remainder = remainder.trim();
+    if remainder.is_empty() {
+        return None;
+    }
+    Some(remainder.to_string())
 }
 
 /// Strip third-person 's' from the first word: "discards a card" → "discard a card".

@@ -93,9 +93,9 @@
 
 use crate::types::ability::{
     AbilityCondition, ControllerRef, CountScope, Duration, EachDamageRecipient, Effect,
-    ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr,
-    QuantityRef, RepeatContinuation, ReplacementCondition, ResolvedAbility, StaticCondition,
-    TargetChoiceTiming, TargetFilter, TrackedAnaphorSource, TriggerCondition,
+    GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition, ResolvedAbility,
+    StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource, TriggerCondition,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 
@@ -191,6 +191,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         chosen_x: _,              // concrete cast-time X
         cost_paid_object: _,      // concrete captured-object snapshot
         effect_context_object: _, // concrete captured-object snapshot
+        amassed_army_object: _,   // concrete captured-object snapshot
         ability_index: _,         // usize provenance
         may_trigger_origin: _,    // provenance tag
         target_selection_mode: _, // Chosen/Random tag
@@ -364,6 +365,16 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(recipient));
             acc
         }
+        Effect::OpponentGuess { guesser, subject } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_controller_ref(guesser));
+            acc = acc.or(scan_guess_subject(subject));
+            acc
+        }
+        Effect::SwapChosenLabels {
+            first: _,
+            second: _,
+        } => Axes::CONSERVATIVE,
         Effect::EachSourceDealsDamage {
             sources,
             amount,
@@ -511,6 +522,17 @@ fn scan_effect(x: &Effect) -> Axes {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(amount));
             acc = acc.or(scan_player_filter(player_filter));
+            acc
+        }
+        Effect::EachPlayerCopyChosen {
+            choose_filter,
+            min: _,
+            max: _,
+            copy_modifications: _,
+            scale: _,
+        } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(choose_filter));
             acc
         }
         Effect::DestroyAll {
@@ -1512,10 +1534,15 @@ fn scan_effect(x: &Effect) -> Axes {
             destination: _,
             tapped: _,
         } => Axes::NONE,
+        Effect::ChooseCounterAdjustment {
+            adjustment: _,
+            count,
+        } => scan_quantity_expr(count),
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             scan_effect(replacement_effect)
         }
         Effect::ChaosEnsues => Axes::NONE,
+        Effect::ReverseTurnOrder => Axes::NONE,
         Effect::ChooseOneOf { .. } => Axes::CONSERVATIVE,
         Effect::Unimplemented {
             name: _,
@@ -1740,6 +1767,7 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             projected: false,
         },
         QuantityRef::DistinctCardTypes { .. } => Axes::CONSERVATIVE,
+        QuantityRef::DistinctSubtypes { .. } => Axes::CONSERVATIVE,
         QuantityRef::CardsExiledBySource => Axes::NONE,
         QuantityRef::ExiledCardPower { index: _ } => Axes::NONE,
         QuantityRef::ZoneCardCount {
@@ -2327,6 +2355,22 @@ fn scan_ability_condition(x: &AbilityCondition) -> Axes {
     }
 }
 
+fn scan_guess_subject(x: &GuessSubject) -> Axes {
+    match x {
+        GuessSubject::CommittedChoice { choice_type: _ } => Axes::NONE,
+        GuessSubject::Proposition {
+            lhs,
+            comparator: _,
+            rhs,
+        } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_quantity_expr(lhs));
+            acc = acc.or(scan_quantity_expr(rhs));
+            acc
+        }
+    }
+}
+
 fn scan_target_filter(x: &TargetFilter) -> Axes {
     match x {
         TargetFilter::None => Axes::NONE,
@@ -2442,6 +2486,7 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
             projected: false,
         },
         TargetFilter::SourceChosenPlayer => Axes::NONE,
+        TargetFilter::PlayerWhoChoseLabel { label: _ } => Axes::NONE,
         TargetFilter::OriginalController => Axes::NONE,
         TargetFilter::PostReplacementSourceController => Axes {
             event: true,
@@ -2492,6 +2537,7 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         // by exclusion within this ability's own resolution — no event/sibling
         // axis, like the demonstrative/anaphoric referents.
         ObjectScope::OtherRevealedCard => Axes::NONE,
+        ObjectScope::AmassedArmy => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
             sibling: false,
@@ -2980,7 +3026,10 @@ fn scan_player_filter(x: &PlayerFilter) -> Axes {
             projected: true,
         },
         PlayerFilter::HasLostTheGame => Axes::NONE,
-        PlayerFilter::OpponentDealtCombatDamage { source } => {
+        // `kind` is a static damage-kind selector (combat/noncombat/any) — not an
+        // event-context, sibling, or projected-growth resource — so it carries no
+        // axis; only the optional `source` sub-filter contributes.
+        PlayerFilter::OpponentDealtDamage { kind: _, source } => {
             let mut acc = Axes {
                 event: false,
                 sibling: false,
@@ -3244,6 +3293,8 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes {
             projected: false,
         },
         ControllerRef::EnchantedPlayer => Axes::NONE,
+        // CR 102.1: a live read of `state.active_player` — no event/sibling axis.
+        ControllerRef::ActivePlayer => Axes::NONE,
     }
 }
 
@@ -3397,6 +3448,8 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
@@ -3417,6 +3470,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::PumpAll { .. }
         | Effect::DamageAll { .. }
         | Effect::DamageEachPlayer { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::DestroyAll { .. }
         | Effect::ChangeZone { .. }
         | Effect::ChangeZoneAll { .. }
@@ -3606,8 +3660,10 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
+        | Effect::ChooseCounterAdjustment { .. }
         | Effect::CreatePlaneswalkReplacement { .. }
         | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
         | Effect::ChooseOneOf { .. }
         | Effect::Unimplemented { .. } => ResolutionChoiceFreedom::MayPrompt,
     }
@@ -3660,6 +3716,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         chosen_x: _,  // concrete cast-time X (chosen at announcement, not resolution)
         cost_paid_object: _, // concrete captured-object snapshot
         effect_context_object: _, // concrete captured-object snapshot
+        amassed_army_object: _, // concrete captured-object snapshot
         ability_index: _, // usize provenance
         may_trigger_origin: _, // provenance tag
         target_selection_mode: _, // Chosen/Random tag (announce-time)

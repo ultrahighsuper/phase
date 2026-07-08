@@ -2477,6 +2477,90 @@ fn target_filter_contains_chosen_x_ref(filter: &TargetFilter) -> bool {
     }
 }
 
+fn target_filter_contains_amassed_army_ref(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(filter_prop_contains_amassed_army_ref),
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            target_filter_contains_amassed_army_ref(filter)
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_contains_amassed_army_ref)
+        }
+        _ => false,
+    }
+}
+
+fn filter_prop_contains_amassed_army_ref(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::Cmc { value, .. }
+        | FilterProp::Counters { count: value, .. }
+        | FilterProp::PtComparison { value, .. } => quantity_expr_contains_amassed_army_ref(value),
+        FilterProp::CanEnchant { target } => target_filter_contains_amassed_army_ref(target),
+        FilterProp::DifferentNameFrom { filter }
+        | FilterProp::TargetsOnly { filter }
+        | FilterProp::Targets { filter } => target_filter_contains_amassed_army_ref(filter),
+        FilterProp::SharesQuality { reference, .. } => reference
+            .as_deref()
+            .is_some_and(target_filter_contains_amassed_army_ref),
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_contains_amassed_army_ref),
+        FilterProp::Not { prop } => filter_prop_contains_amassed_army_ref(prop),
+        _ => false,
+    }
+}
+
+fn quantity_expr_contains_amassed_army_ref(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::Power {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::Toughness {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ObjectColorCount {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ObjectNameWordCount {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ObjectTypelineComponentCount {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ManaSymbolsInManaCost {
+                    scope: ObjectScope::AmassedArmy,
+                    ..
+                },
+        } => true,
+        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_contains_amassed_army_ref(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_contains_amassed_army_ref)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_contains_amassed_army_ref(left)
+                || quantity_expr_contains_amassed_army_ref(right)
+        }
+    }
+}
+
+fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
+    target_filter_contains_chosen_x_ref(filter) || target_filter_contains_amassed_army_ref(filter)
+}
+
 /// CR 601.2c: A negated prop (`FilterProp::Not`) can wrap an X-bearing prop
 /// (e.g. `Not(Cmc { value: X })`), so X resolution must descend into it just
 /// like the `CanEnchant` filter-bearing arm — otherwise an unannounced X in a
@@ -2880,6 +2964,9 @@ pub(crate) fn collect_player_targets(
                         .and_then(|host| host.as_player())
                         == Some(p.id)
                 }
+                // CR 102.1 + CR 109.4: the active player, resolvable directly
+                // (unlike the fail-closed DefendingPlayer arm above).
+                Some(ControllerRef::ActivePlayer) => p.id == state.active_player,
                 None => true,
             })
             .map(|p| p.id)
@@ -3269,6 +3356,12 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
             | CardTypeSetSource::ExiledBySource
             | CardTypeSetSource::TrackedSet { .. } => None,
         },
+        QuantityRef::DistinctSubtypes { source, .. } => match source {
+            CardTypeSetSource::Objects { filter } => filter_target_slot_filter(filter),
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => None,
+        },
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {
             CastManaSpentMetric::FromSource { source_filter } => {
                 filter_target_slot_filter(source_filter)
@@ -3644,7 +3737,7 @@ fn legal_targets_for_ability_filter_uncapped(
         return targets;
     }
 
-    let needs_ability_context = target_filter_contains_chosen_x_ref(filter);
+    let needs_ability_context = target_filter_needs_ability_context(filter);
     let relative_kind = relative_controller_kind(filter);
     if relative_kind.is_none() {
         if needs_ability_context {
@@ -4341,7 +4434,7 @@ fn legal_targets_for_selected_slot(
             _ => spec.filter.clone(),
         };
 
-        if target_filter_contains_chosen_x_ref(&enumeration_filter) {
+        if target_filter_needs_ability_context(&enumeration_filter) {
             if controller == ability.controller {
                 targeting::find_legal_targets_for_ability(state, &enumeration_filter, ability)
             } else {
@@ -5867,10 +5960,13 @@ fn validate_target_constraints(
                 let sum: i32 = targets
                     .iter()
                     .filter_map(|t| match t {
+                        // CR 202.3d + CR 709.4b: object targets may be off the
+                        // stack (cards in a graveyard), where a split card's mana
+                        // value is its combined halves; chosen X on the stack.
                         TargetRef::Object(id) => state
                             .objects
                             .get(id)
-                            .map(|o| o.mana_cost.mana_value_with_x(o.zone, o.cost_x_paid) as i32),
+                            .map(|o| o.effective_mana_value() as i32),
                         TargetRef::Player(_) => None,
                     })
                     .sum();
@@ -6673,6 +6769,38 @@ mod tests {
             !targets.contains(&TargetRef::Player(PlayerId(0))),
             "the controller (P0) must never be a legal opponent payer"
         );
+    }
+
+    /// CR 102.1 (Test 2b, coerced-attack-punisher): an empty-type-filter
+    /// controller-only `ActivePlayer` filter resolves through
+    /// `collect_player_targets` to EXACTLY the active player. Reverting the
+    /// `Some(ControllerRef::ActivePlayer)` arm is a compile error (exhaustive
+    /// match); this test also proves it resolves (not fail-closed) by contrast
+    /// with the fail-closed `DefendingPlayer` sibling.
+    #[test]
+    fn collect_player_targets_active_player_resolves_live() {
+        let mut state = GameState::new(FormatConfig::duel_commander(), 3, 7);
+        state.active_player = PlayerId(2);
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let active_filter =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::ActivePlayer));
+        assert_eq!(
+            collect_player_targets(&state, &ability, &active_filter),
+            vec![PlayerId(2)]
+        );
+        // Sibling: DefendingPlayer stays fail-closed (empty) — proves the new arm
+        // is genuinely resolvable, not a fail-closed default.
+        let defending =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::DefendingPlayer));
+        assert!(collect_player_targets(&state, &ability, &defending).is_empty());
     }
 
     /// Issue #478 regression: a delayed-trigger return effect
@@ -11597,6 +11725,7 @@ mod tests {
             object_id: gone_id,
             lki: LKISnapshot {
                 name: "Exiled Creature".to_string(),
+                token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
                 base_power: Some(2),

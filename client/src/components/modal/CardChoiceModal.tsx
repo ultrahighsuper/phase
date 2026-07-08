@@ -52,6 +52,7 @@ import { MoveCountersDistributionModal } from "./MoveCountersDistributionModal.t
 import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
 import { ProliferateModal } from "./ProliferateModal.tsx";
 import { CategoryChoiceModal } from "./CategoryChoiceModal.tsx";
+import { EachPlayerCopyChosenModal } from "./EachPlayerCopyChosenModal.tsx";
 import {
   CoinFlipKeepModal,
   DigModal,
@@ -176,6 +177,11 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return <DrawnThisTurnTopdeckModal data={waitingFor.data} />;
     case "NamedChoice":
+      if (!canActForWaitingState) return null;
+      return <NamedChoiceModal data={waitingFor.data} />;
+    case "OpponentGuess":
+      // CR 608.2d: the guesser picks one of the offered options. Display-only —
+      // reuses the generic option picker; the engine computes correctness.
       if (!canActForWaitingState) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
     // Pre-choice behold ("choose a creature type and behold N of that type"):
@@ -333,6 +339,9 @@ export function CardChoiceModal() {
     case "CategoryChoice":
       if (!canActForWaitingState) return null;
       return <CategoryChoiceModal data={waitingFor.data} />;
+    case "EachPlayerCopyChosenSelection":
+      if (!canActForWaitingState) return null;
+      return <EachPlayerCopyChosenModal data={waitingFor.data} />;
     case "ManifestDreadChoice":
       if (!canActForWaitingState) return null;
       return <ManifestDreadModal data={waitingFor.data} />;
@@ -2658,9 +2667,9 @@ function CommanderZoneChoiceModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-6">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+      <div className="absolute inset-0 bg-black/68" />
       <motion.div
-        className="card-scale-reset relative w-full max-w-[34rem] overflow-hidden rounded-[22px] border border-white/10 bg-[#0b1020]/94 shadow-[0_28px_70px_rgba(0,0,0,0.5)] backdrop-blur-md"
+        className="card-scale-reset relative w-full max-w-[34rem] overflow-hidden rounded-[12px] border border-white/10 bg-[#0b1020] shadow-[0_18px_48px_rgba(0,0,0,0.48)]"
         data-testid="commander-zone-choice-dialog"
         initial={{ opacity: 0, y: 18, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}

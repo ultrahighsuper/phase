@@ -1541,6 +1541,15 @@ pub enum StaticMode {
     Lifelink,
 
     // -- Tier 2: Rule-modification statics --
+    /// CR 701.26a: "This permanent can't become tapped." Enforced at every place a
+    /// permanent would become tapped — both effect-driven taps
+    /// (`effects::tap_untap::process_one_tap`) and every cost-driven tap, which all
+    /// route through the single authority `restrictions::tap_permanent_for_cost`
+    /// ({T} activation costs, convoke, crew, station, saddle, harmonize, tap-N
+    /// additional costs, and {T} mana abilities). CR 508.1f is the one exemption:
+    /// tapping a creature as it's declared an attacker isn't a cost, so a
+    /// can't-become-tapped creature still taps by attacking. Queried via
+    /// `restrictions::object_cant_tap`.
     CantTap,
     CantUntap,
     /// CR 509.1c: This creature must be blocked if able. `by == None` ⇒ any
@@ -1720,10 +1729,9 @@ pub enum StaticMode {
     /// Yawgmoth (color = Black). `ManaColor` parameterization admits future
     /// printings for any other single color without enum proliferation.
     ///
-    /// **Scope note**: this static currently affects spell-cast mana costs only.
-    /// Activated-ability mana costs are covered by the same 2024-06-07 K'rrik
-    /// ruling but require a `pending_activation` pause/resume primitive not yet
-    /// built. Deferred to GH issue #600.
+    /// **Scope note**: wired through spell-cast and activated-ability mana payment
+    /// via `effective_shard_requirement` promotion and the shared Phyrexian pause
+    /// infrastructure (`maybe_pause_for_phyrexian_choice`).
     PayLifeAsColoredMana {
         color: ManaColor,
     },

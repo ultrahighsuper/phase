@@ -451,6 +451,37 @@ fn runtime_granted_lki_keyword_triggers(
     partition_lki_trigger_definitions(source_obj, record).1
 }
 
+fn lki_source_object_from_zone_change_record(
+    object_id: ObjectId,
+    record: &crate::types::game_state::ZoneChangeRecord,
+) -> Option<GameObject> {
+    if record.name.is_empty() && record.trigger_definitions.is_empty() {
+        return None;
+    }
+    let mut obj = GameObject::new(
+        object_id,
+        crate::types::identifiers::CardId(0),
+        record.owner,
+        record.name.clone(),
+        record.from_zone.unwrap_or(Zone::Battlefield),
+    );
+    obj.controller = record.controller;
+    obj.card_types.core_types = record.core_types.clone();
+    obj.card_types.subtypes = record.subtypes.clone();
+    obj.card_types.supertypes = record.supertypes.clone();
+    obj.keywords = record.keywords.clone();
+    obj.trigger_definitions = record.trigger_definitions.clone().into();
+    obj.power = record.power;
+    obj.toughness = record.toughness;
+    obj.base_power = record.base_power;
+    obj.base_toughness = record.base_toughness;
+    obj.color = record.colors.clone();
+    obj.is_token = record.is_token;
+    obj.attached_to = record.attached_to;
+    obj.is_suspected = record.is_suspected;
+    Some(obj)
+}
+
 fn partition_lki_trigger_definitions(
     source_obj: &GameObject,
     record: &crate::types::game_state::ZoneChangeRecord,
@@ -1920,15 +1951,14 @@ fn collect_pending_triggers(
             ..
         } = event
         {
-            // Only scan if the object wasn't already found by the battlefield scan
-            // (it won't be — it has already moved out — but guard against double-fire).
-            if state
+            let lki_source_obj = state
                 .objects
                 .get(moved_id)
-                .is_some_and(|o| o.zone != Zone::Battlefield)
-            {
+                .filter(|obj| obj.zone != Zone::Battlefield)
+                .cloned()
+                .or_else(|| lki_source_object_from_zone_change_record(*moved_id, record));
+            if let Some(mut obj) = lki_source_obj {
                 let matched_triggers = {
-                    let mut obj = state.objects[moved_id].clone();
                     obj.trigger_definitions =
                         partition_lki_trigger_definitions(&obj, record).0.into();
                     collect_matching_triggers(
@@ -2254,6 +2284,11 @@ fn collect_pending_triggers(
             ..
         } = event
         {
+            // CR 702.102b: NOT-PRE-PAYMENT — this reacts to `GameEvent::SpellCast`,
+            // emitted after payment, so the `fused_split_spell` marker is already
+            // set and the non-fuse-aware collector's marker OR-gate yields the
+            // combined projection. Representative of every `SpellCast`-reactive
+            // `effective_spell_keywords` read in this module.
             let storm_instances =
                 super::casting::effective_spell_keywords(state, *caster, *cast_obj_id)
                     .iter()
@@ -4247,6 +4282,7 @@ pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
         .objects
         .get(&source_id)
         .map(|o| o.name.clone())
+        .or_else(|| state.lki_cache.get(&source_id).map(|lki| lki.name.clone()))
         .unwrap_or_default();
     let entry = StackEntry {
         id: entry_id,
@@ -5558,10 +5594,22 @@ pub(crate) fn process_collected_triggers_with_delayed_phase_events(
     let mut pending = normal_pending;
     pending.extend(delayed_pending);
 
+    // CR 603.3b (issue #770 cluster): a truly-empty batch for *this* event
+    // must still surface an orphaned `pending_trigger`/`deferred_triggers`
+    // left over from earlier processing — mirror the non-empty path's
+    // `current_trigger_prompt` computation below instead of hardcoding
+    // `prompt: None`. Otherwise a phase whose own trigger collection is
+    // legitimately empty silently discards a still-unresolved trigger from a
+    // prior phase, masking it from every later `WaitingFor` check.
     if pending.is_empty() {
+        let prompt = current_trigger_prompt(state, &waiting_before);
+        let fired = state.stack.len() > stack_before
+            || state.pending_trigger.is_some()
+            || !state.deferred_triggers.is_empty()
+            || prompt.is_some();
         return TriggerBatchOutcome {
-            fired: false,
-            prompt: None,
+            fired,
+            prompt,
             consumed_events,
         };
     }
@@ -6361,7 +6409,7 @@ pub(crate) fn check_trigger_condition(
         // CR 603.4 + CR 120.1: "if any of that damage was dealt by a [filter]"
         // evaluates the triggering damage source as it was when the damage was
         // dealt. Reuse the same DamageRecord snapshot matcher as
-        // PlayerFilter::OpponentDealtCombatDamage so later type changes or zone
+        // PlayerFilter::OpponentDealtDamage so later type changes or zone
         // moves do not change what "that damage was dealt by" refers to.
         TriggerCondition::EventDamageSourceMatchesFilter { filter } => trigger_event
             .and_then(|event| match event {
@@ -6519,9 +6567,9 @@ pub(crate) fn check_trigger_condition(
             | PlayerFilter::OpponentLostLife
             | PlayerFilter::OpponentGainedLife
             | PlayerFilter::HasLostTheGame
-            // CR 120.1 + CR 510.1: a set-valued combat-damaged-this-turn
-            // predicate has no single-player "whose turn" semantic.
-            | PlayerFilter::OpponentDealtCombatDamage { .. }
+            // CR 120.1 + CR 510.1: a set-valued damaged-this-turn predicate has
+            // no single-player "whose turn" semantic.
+            | PlayerFilter::OpponentDealtDamage { .. }
             // CR 508.6: a set-valued attacked-this-turn predicate has no
             // single-player "whose turn" semantic.
             | PlayerFilter::OpponentAttacked { .. }
@@ -7295,6 +7343,14 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
             | CardTypeSetSource::TrackedSet { .. } => false,
         },
 
+        // Subtype counting embeds a `TargetFilter` through its source enum too.
+        QuantityRef::DistinctSubtypes { source, .. } => match source {
+            CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
+        },
+
         // Mana-spent metering embeds a `TargetFilter` through its metric enum.
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {
             CastManaSpentMetric::FromSource { source_filter } => {
@@ -7685,6 +7741,79 @@ pub mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    /// Regression (issue #770 cluster — Sheoldred/Replicating Ring/Skyline
+    /// Despot/Bitterbloom/Braids upkeep triggers silently not firing):
+    /// `process_collected_triggers_with_delayed_phase_events` must not
+    /// silently drop an orphaned `pending_trigger` left over from earlier
+    /// processing when the CURRENT event batch's own trigger collection is
+    /// empty. Before the fix, the empty-`pending` fast path hardcoded
+    /// `prompt: None, fired: false` unconditionally — discarding a
+    /// still-unresolved trigger from the caller's view — exactly the class of
+    /// silent trigger-masking the cluster describes: a phase whose own
+    /// collection legitimately finds nothing new must still report an
+    /// orphan from an earlier phase, the same way the non-empty path
+    /// (four lines below the fixed branch) already does via
+    /// `current_trigger_prompt`.
+    #[test]
+    fn empty_batch_still_surfaces_orphaned_pending_trigger() {
+        let mut state = setup();
+        let source_id = ObjectId(1);
+        let controller = PlayerId(0);
+
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            controller,
+        );
+        state.pending_trigger = Some(PendingTrigger {
+            source_id,
+            controller,
+            condition: None,
+            ability,
+            timestamp: 0,
+            target_constraints: vec![],
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        });
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: controller,
+            source_id,
+            description: None,
+            may_trigger_key: None,
+        };
+
+        let mut events_out = Vec::new();
+        // An empty batch for THIS event (no new triggers match anything) must
+        // not discard the orphaned `pending_trigger` set above.
+        let outcome = process_collected_triggers_with_delayed_phase_events(
+            &mut state,
+            vec![],
+            &[],
+            &mut events_out,
+        );
+
+        assert!(
+            outcome.fired,
+            "an orphaned pending_trigger must be reported as still-active \
+             even when this batch's own collection is empty"
+        );
+        assert_eq!(
+            outcome.prompt,
+            Some(state.waiting_for.clone()),
+            "the orphaned trigger's prompt must be surfaced, not silently dropped"
+        );
     }
 
     #[test]
@@ -11002,6 +11131,7 @@ pub mod tests {
             dead,
             crate::types::game_state::LKISnapshot {
                 name: "Countered Dead".to_string(),
+                token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
                 base_power: Some(2),
@@ -17363,6 +17493,7 @@ pub mod tests {
             None,  // face_down_profile
             false, // track_exiled_by_source
             None,  // library_placement
+            None,  // enter_attached_to
             &mut events,
         );
 

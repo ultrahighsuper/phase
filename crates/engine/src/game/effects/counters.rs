@@ -384,6 +384,22 @@ fn apply_pending_counter_post_action(
             }
             true
         }
+        PendingCounterPostAction::ContinueAmassAfterTokenCreation {
+            controller,
+            subtype,
+            count,
+            ability,
+        } => super::amass::continue_amass_after_token_creation(
+            state, controller, &subtype, count, &ability, events,
+        ),
+        PendingCounterPostAction::FinalizeAmass {
+            object_id,
+            subtype,
+            ability,
+        } => {
+            super::amass::finalize_amass(state, object_id, &subtype, &ability, events);
+            true
+        }
         PendingCounterPostAction::InjectPredefinedTokenAbilities { object_id } => {
             // CR 111.10 + CR 400.7: Incubator tokens get predefined
             // subtype abilities and battlefield-entry bookkeeping after their
@@ -713,8 +729,10 @@ pub(crate) fn apply_counter_addition(
         keywords: obj.keywords.clone(),
         power: obj.power,
         toughness: obj.toughness,
-        colors: obj.color.clone(),
-        mana_value: obj.mana_cost.mana_value(),
+        // CR 709.4b + CR 202.3d: combined colors / mana value for a split card off
+        // the stack (no-op for single-face and battlefield Rooms, which gate out).
+        colors: obj.effective_colors(),
+        mana_value: obj.effective_mana_value(),
         controller: obj.controller,
         owner: obj.owner,
         counters: obj
@@ -3523,6 +3541,7 @@ mod tests {
             source_id,
             LKISnapshot {
                 name: "Essence Channeler".to_string(),
+                token_image_ref: None,
                 power: Some(5),
                 toughness: Some(4),
                 base_power: Some(5),

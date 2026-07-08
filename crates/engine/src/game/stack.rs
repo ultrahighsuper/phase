@@ -733,6 +733,26 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 Zone::Battlefield,
                 None,
             );
+            // CR 601.2a + CR 110.2 + CR 110.2a (GitHub #696): A cast permanent's
+            // controller defaults to whoever cast it, not the card's owner —
+            // "that player becomes its controller" (CR 601.2a) when the spell is
+            // put on the stack, and per CR 110.2a "that object enters the
+            // battlefield under that player's control unless the effect
+            // states otherwise." `entry.controller` is the actual caster
+            // (stamped at announce_spell_on_stack from the real
+            // GameAction::CastSpell dispatch), fixed for the spell's lifetime
+            // on the stack. This is a no-op for the overwhelmingly common
+            // owner==caster case. A genuine self-ETB "enters under [X]'s
+            // control" replacement (enters_under) still wins — it runs later,
+            // in replace_event below, and hard-overwrites this default
+            // unconditionally.
+            if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+                controller_override,
+                ..
+            } = &mut proposed
+            {
+                *controller_override = Some(entry.controller);
+            }
             // CR 702.190b: Sneak-cast permanent enters the battlefield tapped.
             // Seed the ZoneChange so ETB-tapped goes through the replacement
             // pipeline (CR 614.1c).
@@ -2006,6 +2026,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         chosen_x,
         cost_paid_object,
         effect_context_object,
+        amassed_army_object,
         ability_index,
         may_trigger_origin,
         target_selection_mode,
@@ -2059,6 +2080,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && chosen_x.is_none()
         && cost_paid_object.is_none()
         && effect_context_object.is_none()
+        && amassed_army_object.is_none()
         && ability_index.is_none()
         && may_trigger_origin.is_none()
         && *target_selection_mode == TargetSelectionMode::Chosen
